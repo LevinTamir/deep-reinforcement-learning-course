@@ -13,26 +13,30 @@ import matplotlib.pyplot as plt
 
 from torch.utils.tensorboard import SummaryWriter
 
-# Directory for saving all figures
+# Directory for saved plots (heatmaps and reward graphs)
 FIG_DIR = "figs_q1"
 os.makedirs(FIG_DIR, exist_ok=True)
 
 
-# ---------------------------------------------------------------------
-# Generate combinations of hyperparameters (used for the sweep)
-# ---------------------------------------------------------------------
 class RunBuilder:
+    '''
+    Build all combinations of hyperparameters.
+    Used in the sweep function.
+    '''
     @staticmethod
     def get_runs(params):
         Run = namedtuple("Run", params.keys())
         return [Run(*v) for v in product(*params.values())]
 
 
-# ---------------------------------------------------------------------
-# GLIE epsilon schedule (linear or exponential)
-# ---------------------------------------------------------------------
 def get_glie(num_episodes, max_epsilon, decay_factor, linear=True):
+    '''
+    Create a GLIE epsilon schedule.
+    If linear=True: epsilon decreases linearly.
+    If linear=False: epsilon decreases exponentially.
+    '''
     eps_min = 0.001
+
     if linear:
         return [
             max(eps_min, max_epsilon - ((1.0 - decay_factor) * i))
@@ -40,15 +44,16 @@ def get_glie(num_episodes, max_epsilon, decay_factor, linear=True):
         ]
     else:
         return [
-            max(eps_min, max_epsilon * (decay_factor**i))
+            max(eps_min, max_epsilon * (decay_factor ** i))
             for i in range(num_episodes)
         ]
 
 
-# ---------------------------------------------------------------------
-# Save plots: Q-table + reward curves
-# ---------------------------------------------------------------------
 def plot_graphs(q, title, heat=False, out_prefix=None, **kwargs):
+    '''
+    Save Q-table heatmap and, if requested, reward statistics.
+    Only used for the selected hyperparameters.
+    '''
     figsize = (8, 6)
 
     # Q-table heatmap
@@ -82,7 +87,7 @@ def plot_graphs(q, title, heat=False, out_prefix=None, **kwargs):
             plt.savefig(f"{out_prefix}_rewards.png", dpi=200)
         plt.close()
 
-    # Mean reward and mean steps (last 100 episodes)
+    # Mean reward and steps
     if avg_reward is not None and steps is not None:
         x_vals = np.arange(len(steps)) * 100
 
@@ -107,18 +112,15 @@ def plot_graphs(q, title, heat=False, out_prefix=None, **kwargs):
         plt.close()
 
 
-# ---------------------------------------------------------------------
-# Epsilon-greedy action selection
-# ---------------------------------------------------------------------
 def epsilon_greedy_action(env, q_values, eps):
+    '''
+    Choose an action using epsilon-greedy.
+    '''
     if random.random() > eps:
         return int(np.argmax(q_values))
     return env.action_space.sample()
 
 
-# ---------------------------------------------------------------------
-# Main Q-learning loop
-# ---------------------------------------------------------------------
 def Q_Learning(
     writer,
     lr,
@@ -126,11 +128,18 @@ def Q_Learning(
     max_epsilon,
     decay_factor,
     linear=True,
-    plot=True,
+    plot=False,
+    save_snapshots=False,
     num_episodes=5000,
     max_steps_per_episode=100,
     run_name="run",
 ):
+    '''
+    Run Tabular Q-learning.
+    If plot=True: save final Q-table + reward curves.
+    If save_snapshots=True: also save heatmaps at episodes 500 and 2000.
+    '''
+
     np.random.seed(1)
     random.seed(1)
 
@@ -156,14 +165,15 @@ def Q_Learning(
 
         for _ in range(max_steps_per_episode):
             steps += 1
+
             action = epsilon_greedy_action(env, q_table[state, :], eps)
             next_state, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             next_state = int(next_state)
 
-            # Q-learning update
-            best_next_q = np.max(q_table[next_state, :])
-            td_target = reward + discount_factor * best_next_q * (0.0 if done else 1.0)
+            # Q-update
+            best_next = np.max(q_table[next_state, :])
+            td_target = reward + discount_factor * best_next * (0.0 if done else 1.0)
             q_table[state, action] = (1 - lr) * q_table[state, action] + lr * td_target
 
             state = next_state
@@ -181,7 +191,7 @@ def Q_Learning(
             writer.add_scalar("Q1/Reward_per_episode", total_reward, episode)
             writer.add_scalar("Q1/Steps_to_goal", steps, episode)
 
-        # Every 100 episodes compute rolling averages
+        # Compute averages every 100 episodes
         if (episode + 1) % 100 == 0:
             mean_steps = float(np.mean(steps_all[-100:]))
             mean_reward = float(np.mean(rewards_episode[-100:]))
@@ -193,17 +203,16 @@ def Q_Learning(
                 writer.add_scalar("Q1/Mean_steps_100", mean_steps, episode + 1)
 
             print(
-                f"[{run_name}] Ep {episode+1}: avgR={mean_reward:.3f}, "
-                f"avgSteps={mean_steps:.1f}, eps={eps:.3f}"
+                f"[{run_name}] Ep {episode+1}  avgR={mean_reward:.3f}  "
+                f"avgSteps={mean_steps:.1f}  eps={eps:.3f}"
             )
 
-        # Save intermediate Q-tables at 500 and 2000 episodes
-        if episode + 1 in (500, 2000):
+        # Snapshot Q-tables (only for the best configuration)
+        if save_snapshots and (episode + 1) in (500, 2000):
             prefix = os.path.join(FIG_DIR, f"{run_name}_ep{episode+1}")
             plot_graphs(q_table, f"Q-table after {episode+1} episodes",
                         heat=True, out_prefix=prefix)
 
-    # Final plots
     if plot:
         final_prefix = os.path.join(FIG_DIR, f"{run_name}_final")
         plot_graphs(
@@ -219,24 +228,28 @@ def Q_Learning(
     return q_table, rewards_episode, avg_steps_list, avg_rewards_list
 
 
-# ---------------------------------------------------------------------
-# Hyperparameter sweep (for the figure in Section 1.5)
-# ---------------------------------------------------------------------
-def Optimize_Q_Learning(num_episodes_sweep=3000):
+def Optimize_Q_Learning(num_episodes_sweep=1500, top_k=5):
+    """
+    Hyperparameter sweep over a simplified grid.
+    All runs are plotted, but only the top_k performing
+    configurations are shown in the legend.
+    """
+
     params = OrderedDict(
         learning_rate=[0.1, 0.01, 0.001],
-        discount_factor=[0.99, 0.999],
+        discount_factor=[0.99, 0.995, 0.999],
         linear=[True, False],
-        decay_factor=[0.99, 0.9995],
+        decay_factor=[0.99, 0.995, 0.999],
     )
 
-    plt.figure(figsize=(10, 6))
+    results = []  # store (run_name, final_reward, x_values, y_values)
 
     for run in RunBuilder.get_runs(params):
         run_name = (
             f"lr={run.learning_rate}_g={run.discount_factor}_"
             f"{'lin' if run.linear else 'exp'}_d={run.decay_factor}"
         )
+
         writer = SummaryWriter(log_dir=f"runs/q1_sweep/{run_name}")
 
         _, _, _, avg_reward_100 = Q_Learning(
@@ -247,31 +260,48 @@ def Optimize_Q_Learning(num_episodes_sweep=3000):
             decay_factor=run.decay_factor,
             linear=run.linear,
             plot=False,
+            save_snapshots=False,
             num_episodes=num_episodes_sweep,
             run_name=run_name,
         )
         writer.close()
 
         x_axis = np.arange(len(avg_reward_100)) * 100
-        plt.plot(x_axis, avg_reward_100, label=run_name)
+        final_reward = avg_reward_100[-1]
 
-    plt.title("Q1: Mean Reward (Last 100 Episodes) – Hyperparameter Sweep")
+        results.append((run_name, final_reward, x_axis, avg_reward_100))
+
+    # Sort runs by last mean reward (descending)
+    results.sort(key=lambda x: x[1], reverse=True)
+
+    # ---- Plot all curves faintly ----
+    plt.figure(figsize=(12, 7))
+    for run_name, _, x_vals, y_vals in results:
+        plt.plot(x_vals, y_vals, color="gray", alpha=0.3, linewidth=1)
+
+    # ---- Highlight top-k curves ----
+    for run_name, _, x_vals, y_vals in results[:top_k]:
+        plt.plot(x_vals, y_vals, linewidth=2.5, label=run_name)
+
+    plt.title("Q1 – Mean Reward (Last 100 Episodes)\nTop Hyperparameter Configurations Highlighted")
     plt.xlabel("Episode")
     plt.ylabel("Mean Reward (last 100)")
-    plt.legend(fontsize=7)
+    plt.legend(fontsize=9)
     plt.tight_layout()
 
-    path = os.path.join(FIG_DIR, "q1_hyperparam_sweep.png")
+    path = os.path.join(FIG_DIR, "q1_hyperparam_sweep_topk.png")
     plt.savefig(path, dpi=200)
     plt.close()
-    print(f"Saved sweep figure to {path}")
+
+    print(f"Saved improved sweep figure to {path}")
+    print("\nTop configurations:")
+    for name, reward, _, _ in results[:top_k]:
+        print(f"{name}   final_mean_reward={reward:.3f}")
 
 
-# ---------------------------------------------------------------------
-# Main execution
-# ---------------------------------------------------------------------
 if __name__ == "__main__":
-    # Final chosen hyperparameters (based on sweep)
+
+    # Final chosen hyperparameters
     learning_rate = 0.1
     discount_factor = 0.999
     linear = True
@@ -279,6 +309,7 @@ if __name__ == "__main__":
 
     writer = SummaryWriter(log_dir="runs/q1_final")
 
+    # Save Q-tables and figures only for this configuration
     Q_Learning(
         writer=writer,
         lr=learning_rate,
@@ -287,9 +318,10 @@ if __name__ == "__main__":
         decay_factor=decay_factor,
         linear=linear,
         plot=True,
+        save_snapshots=True,
         run_name="q1",
     )
     writer.close()
 
-    # Perform sweep (optional)
-    Optimize_Q_Learning(num_episodes_sweep=3000)
+    # Run sweep for comparison
+    Optimize_Q_Learning(num_episodes_sweep=5000)
