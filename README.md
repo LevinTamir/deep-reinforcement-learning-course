@@ -1,6 +1,6 @@
-# Deep Reinforcement Learning – Homework Assignments
+# Deep Reinforcement Learning
 
-This repository contains my assignments for the **Deep Reinforcement Learning (364-2-1031)** course @ **BGU**.
+This repository contains assignments for the **Deep Reinforcement Learning (364-2-1031)** course @ **BGU**.
 
 ## Create the environment
 ```bash
