@@ -1,9 +1,9 @@
 # ============================================
-# Section 2: DQN - CartPole-v1
+# Section 2 – DQN (CartPole-v1)
 # ============================================
 
+import os
 import random
-from typing import List
 
 import gymnasium as gym
 import numpy as np
@@ -11,65 +11,19 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
-from types import SimpleNamespace
+import matplotlib.pyplot as plt
 
+# Directory for saved figures
+FIG_DIR = "figs_q2"
+os.makedirs(FIG_DIR, exist_ok=True)
 
-# --------------------------
-# Network architecture
-# --------------------------
-
-class QNetwork(nn.Module):
-    """
-    64 -> 32 -> 32 -> 24 -> 24 -> action_dim, ReLU activations.
-    """
-
-    def __init__(self, state_dim: int, action_dim: int):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(state_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Linear(32, 32),
-            nn.ReLU(),
-            nn.Linear(32, 24),
-            nn.ReLU(),
-            nn.Linear(24, 24),
-            nn.ReLU(),
-            nn.Linear(24, action_dim),
-        )
-
-        # Optional: He initialization similar to kernel_initializer='he_uniform'
-        for m in self.net:
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_uniform_(m.weight, nonlinearity="relu")
-                nn.init.zeros_(m.bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
-
-
-def build_network(lr: float, net_arch, device: torch.device):
-    """
-    Build a QNetwork + Adam optimizer.
-    """
-    model = QNetwork(net_arch.state_dim, net_arch.action_dim).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-    return model, optimizer
-
-
-# --------------------------
-# Replay Buffer
-# --------------------------
 
 class ReplayBuffer:
-    """
-    Replay Buffer.
-    Each experience: (state, action, next_state, reward, not_done)
-    """
+    '''Fixed-size replay buffer storing (s, a, s', r, not_done) tuples.'''
+
     def __init__(self, capacity: int):
         self.capacity = capacity
-        self.memory: List = []
+        self.memory = []
         self.position = 0
 
     def store(self, experience):
@@ -80,224 +34,406 @@ class ReplayBuffer:
         self.position += 1
 
     def sample(self, batch_size: int):
-        mini_batch = random.sample(self.memory, batch_size)
-        states = np.array([exp[0] for exp in mini_batch], dtype=np.float32)
-        actions = np.array([exp[1] for exp in mini_batch], dtype=np.int64)
-        next_states = np.array([exp[2] for exp in mini_batch], dtype=np.float32)
-        rewards = np.array([exp[3] for exp in mini_batch], dtype=np.float32)
-        not_dones = np.array([exp[4] for exp in mini_batch], dtype=np.float32)
+        batch = random.sample(self.memory, batch_size)
+        states = np.array([e[0] for e in batch], dtype=np.float32)
+        actions = np.array([e[1] for e in batch], dtype=np.int64)
+        next_states = np.array([e[2] for e in batch], dtype=np.float32)
+        rewards = np.array([e[3] for e in batch], dtype=np.float32)
+        not_dones = np.array([e[4] for e in batch], dtype=np.float32)
         return states, actions, next_states, rewards, not_dones
 
     def __len__(self):
         return len(self.memory)
 
 
-# --------------------------
-# DQN Agent
-# --------------------------
+class QNetwork(nn.Module):
+    '''Fully-connected Q-network with a chosen number of hidden layers.'''
 
-class DQN_Agent:
-    def __init__(self, hp, env_dim, device: torch.device):
-        """
-        DQN agent.
+    def __init__(self, state_dim: int, action_dim: int,
+                 hidden_size: int, num_hidden_layers: int):
+        super().__init__()
 
-        hp: hyperparameters
-        env_dim: environment dimensions
-        """
-        self.hp = hp
-        self.net_arch = env_dim
-        self.device = device
+        layers = []
+        in_dim = state_dim
+        for _ in range(num_hidden_layers):
+            layers.append(nn.Linear(in_dim, hidden_size))
+            layers.append(nn.ReLU())
+            in_dim = hidden_size
 
-        self.epsilon = self.hp.max_epsilon
-        self.memory = ReplayBuffer(capacity=self.hp.capacity)
+        layers.append(nn.Linear(in_dim, action_dim))
+        self.net = nn.Sequential(*layers)
 
-        self.online_net, self.optimizer = build_network(
-            lr=self.hp.lr, net_arch=self.net_arch, device=self.device
-        )
-        self.target_net, _ = build_network(
-            lr=self.hp.lr, net_arch=self.net_arch, device=self.device
-        )
-        self.target_net.load_state_dict(self.online_net.state_dict())
+        for m in self.net:
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_uniform_(m.weight, nonlinearity="relu")
+                nn.init.zeros_(m.bias)
 
-        self.loss_fn = nn.MSELoss()
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
 
-    def store_experience(self, experience):
-        self.memory.store(experience=experience)
 
-    def choose_action(self, observation: np.ndarray):
-        """
-        Epsilon-greedy action selection.
-        """
-        if random.uniform(0, 1) < self.epsilon:
-            # Explore
-            a = np.random.choice(self.net_arch.action_dim)
-        else:
-            # Exploit
-            state_t = torch.tensor(observation, dtype=torch.float32, device=self.device).unsqueeze(0)
-            with torch.no_grad():
-                q_vals = self.online_net(state_t)
-            a = int(torch.argmax(q_vals, dim=1).item())
-        self.epsilon_decay()
-        return a
+def build_network(state_dim: int, action_dim: int,
+                  lr: float, device, num_hidden_layers: int):
+    '''Create Q-network and Adam optimizer for the given architecture.'''
+    model = QNetwork(state_dim, action_dim,
+                     hidden_size=128, num_hidden_layers=num_hidden_layers).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    return model, optimizer
 
-    def epsilon_decay(self):
-        self.epsilon = max(self.hp.min_epsilon, self.epsilon * self.hp.epsilon_decay)
 
-    def update_target_network(self):
-        self.target_net.load_state_dict(self.online_net.state_dict())
+def sample_action(q_network: QNetwork,
+                  state: np.ndarray,
+                  epsilon: float,
+                  action_dim: int,
+                  device) -> int:
+    '''ε-greedy action selection using the current Q-network.'''
+    if random.random() < epsilon:
+        return random.randrange(action_dim)
+    state_t = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+    with torch.no_grad():
+        q_vals = q_network(state_t)
+    return int(torch.argmax(q_vals, dim=1).item())
 
-    def update_step(self):
-        """
-        One gradient step of DQN:
-        - sample batch
-        - compute target
-        - update online network
-        Returns loss (float)
-        """
-        # Optional extra epsilon decay per training step
-        self.epsilon_decay()
 
-        if len(self.memory) < self.hp.batch_size:
-            return 0.0
+def save_plots(losses, rewards, moving_avg, run_name: str):
+    '''Save loss and reward plots for a single training run.'''
+    x_loss = np.arange(len(losses))
+    x_ep = np.arange(len(rewards))
 
-        states, actions, next_states, rewards, not_dones = self.memory.sample(self.hp.batch_size)
+    # loss per training step
+    plt.figure(figsize=(8, 5))
+    plt.plot(x_loss, losses)
+    plt.title(f"{run_name} – Loss per training step")
+    plt.xlabel("Training step")
+    plt.ylabel("Loss")
+    plt.tight_layout()
+    plt.savefig(os.path.join(FIG_DIR, f"{run_name}_loss.png"), dpi=200)
+    plt.close()
 
-        states_t = torch.tensor(states, dtype=torch.float32, device=self.device)
-        actions_t = torch.tensor(actions, dtype=torch.int64, device=self.device).unsqueeze(-1)
-        next_states_t = torch.tensor(next_states, dtype=torch.float32, device=self.device)
-        rewards_t = torch.tensor(rewards, dtype=torch.float32, device=self.device).unsqueeze(-1)
-        not_dones_t = torch.tensor(not_dones, dtype=torch.float32, device=self.device).unsqueeze(-1)
+    # reward per episode
+    plt.figure(figsize=(8, 5))
+    plt.plot(x_ep, rewards)
+    plt.title(f"{run_name} – Reward per episode")
+    plt.xlabel("Episode")
+    plt.ylabel("Total reward")
+    plt.tight_layout()
+    plt.savefig(os.path.join(FIG_DIR, f"{run_name}_reward.png"), dpi=200)
+    plt.close()
 
-        # Q(s,a) for taken actions
-        q_pred = self.online_net(states_t).gather(1, actions_t)
+    # moving average over last 100 episodes
+    plt.figure(figsize=(8, 5))
+    plt.plot(x_ep, moving_avg)
+    plt.title(f"{run_name} – Mean reward (last 100 episodes)")
+    plt.xlabel("Episode")
+    plt.ylabel("Mean reward (100 ep)")
+    plt.tight_layout()
+    plt.savefig(os.path.join(FIG_DIR, f"{run_name}_mean_reward_100.png"), dpi=200)
+    plt.close()
 
-        # Q_target(s', a') from target network
-        with torch.no_grad():
-            q_next = self.target_net(next_states_t)
-            max_q_next = torch.max(q_next, dim=1, keepdim=True)[0]
-            q_target = rewards_t + self.hp.gamma * max_q_next * not_dones_t
 
-        loss = self.loss_fn(q_pred, q_target)
+def train_agent(
+    num_hidden_layers: int,
+    hp: dict,
+    state_dim: int,
+    action_dim: int,
+    run_name: str,
+    log_dir: str,
+    max_episodes: int = 1000,
+    max_steps: int = 500,
+    max_score: float = 475.0,
+    save_figures: bool = True,
+):
+    '''Run one DQN training loop for a single hyperparameter setting.'''
 
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[{run_name}] using device: {device}")
 
-        return float(loss.item())
+    env = gym.make("CartPole-v1")
+    env.reset(seed=1)
+    env.action_space.seed(1)
 
-    def test_agent(self, env, visualize=True):
-        """
-        Greedy evaluation using online network.
-        """
-        state, info = env.reset()
-        total_reward = 0.0
+    # online and target networks
+    online_net, optimizer = build_network(
+        state_dim, action_dim, hp["lr"], device, num_hidden_layers
+    )
+    target_net, _ = build_network(
+        state_dim, action_dim, hp["lr"], device, num_hidden_layers
+    )
+    target_net.load_state_dict(online_net.state_dict())
+    target_net.eval()
+
+    buffer = ReplayBuffer(capacity=hp["capacity"])
+    writer = SummaryWriter(log_dir=log_dir)
+
+    epsilon = hp["max_epsilon"]
+    loss_fn = nn.MSELoss()
+
+    total_steps = 0
+    episode_losses = []
+    episode_rewards = []
+    moving_avg_rewards = []
+    best_solved_episode = None
+
+    for episode in range(max_episodes):
+        state, _ = env.reset()
         done = False
+        ep_reward = 0.0
+
+        for _ in range(max_steps):
+            total_steps += 1
+
+            # choose action and step environment
+            action = sample_action(online_net, state, epsilon, action_dim, device)
+            next_state, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            ep_reward += reward
+
+            not_done = 0.0 if done else 1.0
+            buffer.store((state, action, next_state, reward, not_done))
+            state = next_state
+
+            # epsilon decay per step
+            epsilon = max(hp["min_epsilon"], epsilon * hp["epsilon_decay"])
+
+            # update only if enough samples
+            if len(buffer) >= hp["batch_size"]:
+                states, actions, next_states, rewards, not_dones = buffer.sample(
+                    hp["batch_size"]
+                )
+
+                states_t = torch.tensor(states, dtype=torch.float32, device=device)
+                actions_t = torch.tensor(actions, dtype=torch.int64, device=device).unsqueeze(-1)
+                next_states_t = torch.tensor(next_states, dtype=torch.float32, device=device)
+                rewards_t = torch.tensor(rewards, dtype=torch.float32, device=device).unsqueeze(-1)
+                not_dones_t = torch.tensor(not_dones, dtype=torch.float32, device=device).unsqueeze(-1)
+
+                q_values = online_net(states_t).gather(1, actions_t)
+
+                with torch.no_grad():
+                    q_next = target_net(next_states_t)
+                    max_q_next = q_next.max(dim=1, keepdim=True)[0]
+                    q_targets = rewards_t + hp["gamma"] * max_q_next * not_dones_t
+
+                loss = loss_fn(q_values, q_targets)
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                writer.add_scalar(f"{run_name}/loss_step", loss.item(), total_steps)
+                episode_losses.append(loss.item())
+
+                # update target network every C steps
+                if total_steps % hp["target_update_period"] == 0:
+                    target_net.load_state_dict(online_net.state_dict())
+
+            if done:
+                break
+
+        episode_rewards.append(ep_reward)
+
+        if len(episode_rewards) >= 100:
+            mean_last_100 = float(np.mean(episode_rewards[-100:]))
+        else:
+            mean_last_100 = float(np.mean(episode_rewards))
+
+        moving_avg_rewards.append(mean_last_100)
+
+        writer.add_scalar(f"{run_name}/reward_episode", ep_reward, episode)
+        writer.add_scalar(f"{run_name}/reward_mean_100", mean_last_100, episode)
+        writer.add_scalar(f"{run_name}/epsilon", epsilon, episode)
+
+        print(
+            f"[{run_name}] ep {episode+1}  "
+            f"reward={ep_reward:.1f}  mean_100={mean_last_100:.1f}  "
+            f"eps={epsilon:.3f}"
+        )
+
+        if mean_last_100 >= max_score and best_solved_episode is None and len(episode_rewards) >= 100:
+            best_solved_episode = episode + 1
+            print(
+                f"[{run_name}] solved after {best_solved_episode} episodes "
+                f"(mean reward ≥ {max_score} over 100 episodes)"
+            )
+
+        # run ~50 more episodes after solve and then stop
+        if best_solved_episode is not None and episode - best_solved_episode > 50:
+            print(f"[{run_name}] stopping 50 episodes after solve")
+            break
+
+    env.close()
+    writer.close()
+
+    if save_figures:
+        save_plots(episode_losses, episode_rewards, moving_avg_rewards, run_name)
+
+    best_mean_100 = max(moving_avg_rewards) if moving_avg_rewards else 0.0
+
+    return {
+        "online_net": online_net,
+        "episode_rewards": episode_rewards,
+        "moving_avg_rewards": moving_avg_rewards,
+        "episode_losses": episode_losses,
+        "solved_at": best_solved_episode,
+        "best_mean_100": best_mean_100,
+    }
+
+
+def test_agent(q_network: QNetwork, episodes: int = 5, render: bool = False):
+    '''Run a greedy policy with a trained network for a few episodes.'''
+    device = next(q_network.parameters()).device
+    env = gym.make("CartPole-v1", render_mode="human" if render else None)
+    env.reset(seed=123)
+
+    for ep in range(episodes):
+        state, _ = env.reset()
+        done = False
+        total_reward = 0.0
 
         while not done:
-            if visualize:
-                env.render()
-
-            state_t = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+            state_t = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
             with torch.no_grad():
-                q_vals = self.online_net(state_t)
-            a = int(torch.argmax(q_vals, dim=1).item())
+                q_vals = q_network(state_t)
+            action = int(torch.argmax(q_vals, dim=1).item())
 
-            next_state, reward, terminated, truncated, info = env.step(a)
+            next_state, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             total_reward += reward
             state = next_state
 
-        print(f"Total reward in test: {total_reward:.2f}")
-        env.close()
+        print(f"[test] episode {ep+1} reward = {total_reward:.1f}")
+
+    env.close()
 
 
-# --------------------------
-# Main Training Loop
-# --------------------------
+def optimize_dqn(state_dim: int, action_dim: int,
+                 max_episodes_sweep: int = 600):
+    '''Run a small hyper-parameter sweep for 3- and 5-layer DQNs.'''
+    # search ranges from the assignment
+    lrs = [1e-4, 1e-5]
+    gammas = [0.99, 0.999]
+    batch_sizes = [64, 128]
+    target_periods = [100, 200]
 
-if __name__ == '__main__':
-    env = gym.make('CartPole-v1')
-    writer = SummaryWriter(log_dir="runs/dqn_cartpole/5_layers")
-
-    # Environment dimensions
-    env_dim_dict = {
-        'state_dim': env.observation_space.shape[0],
-        'action_dim': env.action_space.n,
+    base_hp = {
+        "lr": 1e-4,             # will be overwritten in the loops
+        "batch_size": 128,      # will be overwritten
+        "capacity": 10_000,
+        "gamma": 0.99,          # will be overwritten
+        "max_epsilon": 1.0,
+        "min_epsilon": 0.01,
+        "epsilon_decay": 0.999,
+        "target_update_period": 100,  # will be overwritten
     }
-    env_dim = SimpleNamespace(**env_dim_dict)
 
-    # Best hyperparameters from the reference (adapted) :contentReference[oaicite:3]{index=3}
-    best_hyper_parameters = {
-        'lr': 0.0001,
-        'batch_size': 128,
-        'capacity': 10_000,
-        'gamma': 0.99,
-        'max_epsilon': 0.9,
-        'min_epsilon': 0.01,
-        'epsilon_decay': 0.999,
-        'target_update_period': 100,
+    results = []
+
+    for depth in (3, 5):
+        for lr in lrs:
+            for gamma in gammas:
+                for bs in batch_sizes:
+                    for tu in target_periods:
+                        hp = base_hp.copy()
+                        hp["lr"] = lr
+                        hp["gamma"] = gamma
+                        hp["batch_size"] = bs
+                        hp["target_update_period"] = tu
+
+                        run_name = f"sweep_L{depth}_lr{lr}_g{gamma}_bs{bs}_tu{tu}"
+                        log_dir = f"runs/q2_sweep/{run_name}"
+
+                        print(f"\n=== starting sweep run: {run_name} ===")
+                        res = train_agent(
+                            num_hidden_layers=depth,
+                            hp=hp,
+                            state_dim=state_dim,
+                            action_dim=action_dim,
+                            run_name=run_name,
+                            log_dir=log_dir,
+                            max_episodes=max_episodes_sweep,
+                            save_figures=False,  # do not spam figures for all runs
+                        )
+                        res["run_name"] = run_name
+                        res["depth"] = depth
+                        res["hp"] = hp
+                        results.append(res)
+
+    # sort by best mean reward over 100 episodes
+    results.sort(key=lambda r: r["best_mean_100"], reverse=True)
+
+    # print top few configurations
+    print("\nTop 5 configurations by best mean_100:")
+    for r in results[:5]:
+        hp = r["hp"]
+        print(
+            f"{r['run_name']} | depth={r['depth']} | "
+            f"best_mean_100={r['best_mean_100']:.2f} | "
+            f"lr={hp['lr']} gamma={hp['gamma']} bs={hp['batch_size']} tu={hp['target_update_period']}"
+        )
+
+    # plot mean_100 curves for the best few runs
+    top_k = min(5, len(results))
+    plt.figure(figsize=(10, 6))
+    for r in results[:top_k]:
+        x = np.arange(len(r["moving_avg_rewards"]))
+        label = f"L{r['depth']}, lr={r['hp']['lr']}, g={r['hp']['gamma']}, bs={r['hp']['batch_size']}, tu={r['hp']['target_update_period']}"
+        plt.plot(x, r["moving_avg_rewards"], label=label)
+
+    plt.title("Q2 – Mean Reward (Last 100 Episodes) – Best DQN Configurations")
+    plt.xlabel("Episode")
+    plt.ylabel("Mean Reward (last 100)")
+    plt.legend(fontsize=7)
+    plt.tight_layout()
+    sweep_fig = os.path.join(FIG_DIR, "q2_hyperparam_sweep_best.png")
+    plt.savefig(sweep_fig, dpi=200)
+    plt.close()
+    print(f"Saved sweep comparison figure to {sweep_fig}")
+
+    return results
+
+
+if __name__ == "__main__":
+    '''Entry point – trains final 3- and 5-layer DQNs and (optionally) runs a sweep.'''
+
+    # base environment for dimensions
+    env = gym.make("CartPole-v1")
+    state_dim = env.observation_space.shape[0]
+    action_dim = env.action_space.n
+    env.close()
+
+    # hyperparameters chosen for the final solution (after running the sweep)
+    best_hp = {
+        "lr": 1e-4,
+        "batch_size": 128,
+        "capacity": 10_000,
+        "gamma": 0.99,
+        "max_epsilon": 1.0,
+        "min_epsilon": 0.01,
+        "epsilon_decay": 0.999,
+        "target_update_period": 100,
     }
-    hp = SimpleNamespace(**best_hyper_parameters)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[INFO] Using device: {device}")
+    # train 3-layer network with full plots
+    res_3 = train_agent(
+        num_hidden_layers=3,
+        hp=best_hp,
+        state_dim=state_dim,
+        action_dim=action_dim,
+        run_name="q2_3_layers",
+        log_dir="runs/q2_3_layers",
+        save_figures=True,
+    )
 
-    agent = DQN_Agent(hp=hp, env_dim=env_dim, device=device)
+    # train 5-layer network with full plots
+    res_5 = train_agent(
+        num_hidden_layers=5,
+        hp=best_hp,
+        state_dim=state_dim,
+        action_dim=action_dim,
+        run_name="q2_5_layers",
+        log_dir="runs/q2_5_layers",
+        save_figures=True,
+    )
 
-    max_episodes = 1000
-    max_steps = 500
-    max_score = 475.0  # solving threshold (100-episode moving avg)
-    total_steps = 0
-
-    episode_loss = []
-    average_score = []
-
-    for episode in range(max_episodes):
-        state, info = env.reset()
-        done = False
-        episode_score = 0.0
-
-        for step in range(max_steps):
-            total_steps += 1
-
-            action = agent.choose_action(observation=state)
-            next_state, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
-            episode_score += reward
-
-            not_done = 0.0 if done else 1.0
-            agent.store_experience((state, action, next_state, reward, not_done))
-
-            if done:
-                average_score.append(episode_score)
-                print(f"Episode: {episode + 1} | Score: {episode_score}")
-                break
-
-            state = next_state
-            loss = agent.update_step()
-            writer.add_scalar('Loss/train_step', loss, total_steps)
-            episode_loss.append(loss)
-
-            if (total_steps + 1) % hp.target_update_period == 0:
-                agent.update_target_network()
-
-        # TensorBoard episode logs
-        writer.add_scalar('Reward/episode', episode_score, episode)
-        if len(average_score) >= 100:
-            mean_last_100 = float(np.mean(average_score[-100:]))
-        else:
-            mean_last_100 = float(np.mean(average_score))
-        writer.add_scalar('Reward/mean_last_100', mean_last_100, episode)
-
-        if (episode + 1) % 100 == 0:
-            print(f"100-Episode Average Score: {mean_last_100:.2f}")
-
-        if len(average_score) >= 100 and mean_last_100 >= max_score:
-            print(
-                "\nGreat!! "
-                f"You solved the environment after {episode + 1} episodes.\n"
-                f"Average reward over last 100 episodes: {mean_last_100:.2f}"
-            )
-            break
-
-    writer.close()
+    # optional: run hyper-parameter sweep to tune the network
+    # optimize_dqn(state_dim=state_dim, action_dim=action_dim, max_episodes_sweep=600)

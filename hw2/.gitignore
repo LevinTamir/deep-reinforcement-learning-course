@@ -1,0 +1,27 @@
+# Figures
+figs_q1/
+figs_q2/
+figs*/
+*.png
+
+# TensorBoard logs
+runs/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Conda environment junk (local paths)
+.env/
+.venv/
+*.egg-info/
+
+# Jupyter notebooks checkpoints (if any)
+.ipynb_checkpoints/
+
+# VSCode settings (optional)
+.vscode/
+
+# MacOS / Windows system files (optional)
+.DS_Store
+Thumbs.db

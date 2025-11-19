@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 
 from torch.utils.tensorboard import SummaryWriter
 
-# Directory for saved plots (heatmaps and reward graphs)
+# Directory for saved figures
 FIG_DIR = "figs_q1"
 os.makedirs(FIG_DIR, exist_ok=True)
 
