@@ -13,13 +13,16 @@ import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
 
-# Directory for saved figures
+# directory for saved figures
 FIG_DIR = "figs_q2"
 os.makedirs(FIG_DIR, exist_ok=True)
 
 
 class ReplayBuffer:
-    '''Fixed-size replay buffer storing (s, a, s', r, not_done) tuples.'''
+    '''
+    Fixed-size replay buffer storing (s, a, s', r, not_done) tuples.
+    
+    '''
 
     def __init__(self, capacity: int):
         self.capacity = capacity
@@ -27,6 +30,10 @@ class ReplayBuffer:
         self.position = 0
 
     def store(self, experience):
+        '''
+        Store a single transition in the buffer.
+        
+        '''
         if len(self.memory) < self.capacity:
             self.memory.append(experience)
         else:
@@ -34,6 +41,10 @@ class ReplayBuffer:
         self.position += 1
 
     def sample(self, batch_size: int):
+        '''
+        Sample a random minibatch of transitions.
+       
+         '''
         batch = random.sample(self.memory, batch_size)
         states = np.array([e[0] for e in batch], dtype=np.float32)
         actions = np.array([e[1] for e in batch], dtype=np.int64)
@@ -47,7 +58,10 @@ class ReplayBuffer:
 
 
 class QNetwork(nn.Module):
-    '''Fully-connected Q-network with a chosen number of hidden layers.'''
+    '''
+    Fully connected Q-network with a chosen number of hidden layers.
+    
+    '''
 
     def __init__(self, state_dim: int, action_dim: int,
                  hidden_size: int, num_hidden_layers: int):
@@ -63,6 +77,7 @@ class QNetwork(nn.Module):
         layers.append(nn.Linear(in_dim, action_dim))
         self.net = nn.Sequential(*layers)
 
+        # He initialization for linear layers
         for m in self.net:
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_uniform_(m.weight, nonlinearity="relu")
@@ -74,7 +89,10 @@ class QNetwork(nn.Module):
 
 def build_network(state_dim: int, action_dim: int,
                   lr: float, device, num_hidden_layers: int):
-    '''Create Q-network and Adam optimizer for the given architecture.'''
+    '''
+    Create Q-network and Adam optimizer for the given architecture.
+    
+    '''
     model = QNetwork(state_dim, action_dim,
                      hidden_size=128, num_hidden_layers=num_hidden_layers).to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
@@ -86,7 +104,10 @@ def sample_action(q_network: QNetwork,
                   epsilon: float,
                   action_dim: int,
                   device) -> int:
-    '''ε-greedy action selection using the current Q-network.'''
+    '''
+    ε-greedy action selection using the current Q-network.
+    
+    '''
     if random.random() < epsilon:
         return random.randrange(action_dim)
     state_t = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
@@ -96,7 +117,10 @@ def sample_action(q_network: QNetwork,
 
 
 def save_plots(losses, rewards, moving_avg, run_name: str):
-    '''Save loss and reward plots for a single training run.'''
+    '''
+    Save loss and reward plots for a single training run.
+    
+    '''
     x_loss = np.arange(len(losses))
     x_ep = np.arange(len(rewards))
 
@@ -138,12 +162,15 @@ def train_agent(
     action_dim: int,
     run_name: str,
     log_dir: str,
-    max_episodes: int = 1000,
+    max_episodes: int = 600,
     max_steps: int = 500,
     max_score: float = 475.0,
     save_figures: bool = True,
 ):
-    '''Run one DQN training loop for a single hyperparameter setting.'''
+    '''
+    Run one DQN training loop for a single hyperparameter setting.
+    
+    '''
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[{run_name}] using device: {device}")
@@ -308,7 +335,11 @@ def test_agent(q_network: QNetwork, episodes: int = 5, render: bool = False):
 
 def optimize_dqn(state_dim: int, action_dim: int,
                  max_episodes_sweep: int = 600):
-    '''Run a small hyper-parameter sweep for 3- and 5-layer DQNs.'''
+    '''
+    Run a small hyper-parameter sweep for 3 and 5 layer DQNs.
+    
+    '''
+
     # search ranges from the assignment
     lrs = [1e-4, 1e-5]
     gammas = [0.99, 0.999]
@@ -316,7 +347,7 @@ def optimize_dqn(state_dim: int, action_dim: int,
     target_periods = [100, 200]
 
     base_hp = {
-        "lr": 1e-4,             # will be overwritten in the loops
+        "lr": 1e-4,             # will be overwritten
         "batch_size": 128,      # will be overwritten
         "capacity": 10_000,
         "gamma": 0.99,          # will be overwritten
@@ -351,7 +382,7 @@ def optimize_dqn(state_dim: int, action_dim: int,
                             run_name=run_name,
                             log_dir=log_dir,
                             max_episodes=max_episodes_sweep,
-                            save_figures=False,  # do not spam figures for all runs
+                            save_figures=False,
                         )
                         res["run_name"] = run_name
                         res["depth"] = depth
@@ -371,12 +402,29 @@ def optimize_dqn(state_dim: int, action_dim: int,
             f"lr={hp['lr']} gamma={hp['gamma']} bs={hp['batch_size']} tu={hp['target_update_period']}"
         )
 
-    # plot mean_100 curves for the best few runs
+    # 1) plot mean_100 curves for ALL runs (no legend)
+    plt.figure(figsize=(10, 6))
+    for r in results:
+        x = np.arange(len(r["moving_avg_rewards"]))
+        plt.plot(x, r["moving_avg_rewards"], alpha=0.3)
+    plt.title("Q2 – Mean Reward (Last 100 Episodes) – All DQN Configurations")
+    plt.xlabel("Episode")
+    plt.ylabel("Mean Reward (last 100)")
+    plt.tight_layout()
+    all_fig = os.path.join(FIG_DIR, "q2_hyperparam_sweep_all.png")
+    plt.savefig(all_fig, dpi=200)
+    plt.close()
+    print(f"Saved sweep figure (all configs) to {all_fig}")
+
+    # 2) plot mean_100 curves for the best few runs (with legend)
     top_k = min(5, len(results))
     plt.figure(figsize=(10, 6))
     for r in results[:top_k]:
         x = np.arange(len(r["moving_avg_rewards"]))
-        label = f"L{r['depth']}, lr={r['hp']['lr']}, g={r['hp']['gamma']}, bs={r['hp']['batch_size']}, tu={r['hp']['target_update_period']}"
+        label = (
+            f"L{r['depth']}, lr={r['hp']['lr']}, "
+            f"g={r['hp']['gamma']}, bs={r['hp']['batch_size']}, tu={r['hp']['target_update_period']}"
+        )
         plt.plot(x, r["moving_avg_rewards"], label=label)
 
     plt.title("Q2 – Mean Reward (Last 100 Episodes) – Best DQN Configurations")
@@ -384,18 +432,20 @@ def optimize_dqn(state_dim: int, action_dim: int,
     plt.ylabel("Mean Reward (last 100)")
     plt.legend(fontsize=7)
     plt.tight_layout()
-    sweep_fig = os.path.join(FIG_DIR, "q2_hyperparam_sweep_best.png")
-    plt.savefig(sweep_fig, dpi=200)
+    best_fig = os.path.join(FIG_DIR, "q2_hyperparam_sweep_best.png")
+    plt.savefig(best_fig, dpi=200)
     plt.close()
-    print(f"Saved sweep comparison figure to {sweep_fig}")
+    print(f"Saved sweep comparison figure (best few) to {best_fig}")
 
     return results
 
 
 if __name__ == "__main__":
-    '''Entry point – trains final 3- and 5-layer DQNs and (optionally) runs a sweep.'''
+    '''
+    Entry point: trains final 3- and 5-layer DQNs and (optionally) runs a sweep.
+    
+    '''
 
-    # base environment for dimensions
     env = gym.make("CartPole-v1")
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.n
@@ -406,8 +456,8 @@ if __name__ == "__main__":
         "lr": 1e-4,
         "batch_size": 128,
         "capacity": 10_000,
-        "gamma": 0.99,
-        "max_epsilon": 1.0,
+        "gamma": 0.999,
+        "max_epsilon": 0.9,
         "min_epsilon": 0.01,
         "epsilon_decay": 0.999,
         "target_update_period": 100,
@@ -435,5 +485,5 @@ if __name__ == "__main__":
         save_figures=True,
     )
 
-    # optional: run hyper-parameter sweep to tune the network
+    # run hyper-parameter sweep to tune the network
     # optimize_dqn(state_dim=state_dim, action_dim=action_dim, max_episodes_sweep=600)
