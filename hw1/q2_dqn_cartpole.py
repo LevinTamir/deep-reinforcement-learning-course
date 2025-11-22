@@ -1,7 +1,3 @@
-# ============================================
-# Section 2 – DQN (CartPole-v1)
-# ============================================
-
 import os
 import random
 
@@ -9,151 +5,13 @@ import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
 
-# directory for saved figures
-FIG_DIR = "figs_q2"
+from utils import QNetwork, ReplayBuffer, build_network, sample_action, save_plots
+
+FIG_DIR = "DQN"
 os.makedirs(FIG_DIR, exist_ok=True)
-
-
-class ReplayBuffer:
-    '''
-    Fixed-size replay buffer storing (s, a, s', r, not_done) tuples.
-    
-    '''
-
-    def __init__(self, capacity: int):
-        self.capacity = capacity
-        self.memory = []
-        self.position = 0
-
-    def store(self, experience):
-        '''
-        Store a single transition in the buffer.
-        
-        '''
-        if len(self.memory) < self.capacity:
-            self.memory.append(experience)
-        else:
-            self.memory[self.position % self.capacity] = experience
-        self.position += 1
-
-    def sample(self, batch_size: int):
-        '''
-        Sample a random minibatch of transitions.
-       
-         '''
-        batch = random.sample(self.memory, batch_size)
-        states = np.array([e[0] for e in batch], dtype=np.float32)
-        actions = np.array([e[1] for e in batch], dtype=np.int64)
-        next_states = np.array([e[2] for e in batch], dtype=np.float32)
-        rewards = np.array([e[3] for e in batch], dtype=np.float32)
-        not_dones = np.array([e[4] for e in batch], dtype=np.float32)
-        return states, actions, next_states, rewards, not_dones
-
-    def __len__(self):
-        return len(self.memory)
-
-
-class QNetwork(nn.Module):
-    '''
-    Fully connected Q-network with a chosen number of hidden layers.
-    
-    '''
-
-    def __init__(self, state_dim: int, action_dim: int,
-                 hidden_size: int, num_hidden_layers: int):
-        super().__init__()
-
-        layers = []
-        in_dim = state_dim
-        for _ in range(num_hidden_layers):
-            layers.append(nn.Linear(in_dim, hidden_size))
-            layers.append(nn.ReLU())
-            in_dim = hidden_size
-
-        layers.append(nn.Linear(in_dim, action_dim))
-        self.net = nn.Sequential(*layers)
-
-        # He initialization for linear layers
-        for m in self.net:
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_uniform_(m.weight, nonlinearity="relu")
-                nn.init.zeros_(m.bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
-
-
-def build_network(state_dim: int, action_dim: int,
-                  lr: float, device, num_hidden_layers: int):
-    '''
-    Create Q-network and Adam optimizer for the given architecture.
-    
-    '''
-    model = QNetwork(state_dim, action_dim,
-                     hidden_size=128, num_hidden_layers=num_hidden_layers).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-    return model, optimizer
-
-
-def sample_action(q_network: QNetwork,
-                  state: np.ndarray,
-                  epsilon: float,
-                  action_dim: int,
-                  device) -> int:
-    '''
-    ε-greedy action selection using the current Q-network.
-    
-    '''
-    if random.random() < epsilon:
-        return random.randrange(action_dim)
-    state_t = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
-    with torch.no_grad():
-        q_vals = q_network(state_t)
-    return int(torch.argmax(q_vals, dim=1).item())
-
-
-def save_plots(losses, rewards, moving_avg, run_name: str):
-    '''
-    Save loss and reward plots for a single training run.
-    
-    '''
-    x_loss = np.arange(len(losses))
-    x_ep = np.arange(len(rewards))
-
-    # loss per training step
-    plt.figure(figsize=(8, 5))
-    plt.plot(x_loss, losses)
-    plt.title(f"{run_name} – Loss per training step")
-    plt.xlabel("Training step")
-    plt.ylabel("Loss")
-    plt.tight_layout()
-    plt.savefig(os.path.join(FIG_DIR, f"{run_name}_loss.png"), dpi=200)
-    plt.close()
-
-    # reward per episode
-    plt.figure(figsize=(8, 5))
-    plt.plot(x_ep, rewards)
-    plt.title(f"{run_name} – Reward per episode")
-    plt.xlabel("Episode")
-    plt.ylabel("Total reward")
-    plt.tight_layout()
-    plt.savefig(os.path.join(FIG_DIR, f"{run_name}_reward.png"), dpi=200)
-    plt.close()
-
-    # moving average over last 100 episodes
-    plt.figure(figsize=(8, 5))
-    plt.plot(x_ep, moving_avg)
-    plt.title(f"{run_name} – Mean reward (last 100 episodes)")
-    plt.xlabel("Episode")
-    plt.ylabel("Mean reward (100 ep)")
-    plt.tight_layout()
-    plt.savefig(os.path.join(FIG_DIR, f"{run_name}_mean_reward_100.png"), dpi=200)
-    plt.close()
-
 
 def train_agent(
     num_hidden_layers: int,
@@ -165,21 +23,22 @@ def train_agent(
     max_episodes: int = 600,
     max_steps: int = 500,
     max_score: float = 475.0,
-    save_figures: bool = True,
+    random_seed: int = 42
+
 ):
-    '''
-    Run one DQN training loop for a single hyperparameter setting.
-    
-    '''
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[{run_name}] using device: {device}")
+    print(f"{run_name} using device: {device}")
 
+
+    random.seed(random_seed)
+    np.random.seed(random_seed)
+    torch.manual_seed(random_seed)
+    
     env = gym.make("CartPole-v1")
     env.reset(seed=1)
     env.action_space.seed(1)
 
-    # online and target networks
     online_net, optimizer = build_network(
         state_dim, action_dim, hp["lr"], device, num_hidden_layers
     )
@@ -209,7 +68,6 @@ def train_agent(
         for _ in range(max_steps):
             total_steps += 1
 
-            # choose action and step environment
             action = sample_action(online_net, state, epsilon, action_dim, device)
             next_state, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
@@ -271,7 +129,7 @@ def train_agent(
         writer.add_scalar(f"{run_name}/epsilon", epsilon, episode)
 
         print(
-            f"[{run_name}] ep {episode+1}  "
+            f"{run_name} ep {episode+1}  "
             f"reward={ep_reward:.1f}  mean_100={mean_last_100:.1f}  "
             f"eps={epsilon:.3f}"
         )
@@ -279,20 +137,19 @@ def train_agent(
         if mean_last_100 >= max_score and best_solved_episode is None and len(episode_rewards) >= 100:
             best_solved_episode = episode + 1
             print(
-                f"[{run_name}] solved after {best_solved_episode} episodes "
+                f"{run_name} solved after {best_solved_episode} episodes "
                 f"(mean reward ≥ {max_score} over 100 episodes)"
             )
 
         # run ~50 more episodes after solve and then stop
         if best_solved_episode is not None and episode - best_solved_episode > 50:
-            print(f"[{run_name}] stopping 50 episodes after solve")
+            print(f"{run_name} stopping 50 episodes after solve")
             break
 
     env.close()
     writer.close()
 
-    if save_figures:
-        save_plots(episode_losses, episode_rewards, moving_avg_rewards, run_name)
+    save_plots(episode_losses, episode_rewards, moving_avg_rewards, run_name, FIG_DIR)
 
     best_mean_100 = max(moving_avg_rewards) if moving_avg_rewards else 0.0
 
@@ -307,7 +164,6 @@ def train_agent(
 
 
 def test_agent(q_network: QNetwork, episodes: int = 5, render: bool = False):
-    '''Run a greedy policy with a trained network for a few episodes.'''
     device = next(q_network.parameters()).device
     env = gym.make("CartPole-v1", render_mode="human" if render else None)
     env.reset(seed=123)
@@ -382,7 +238,6 @@ def optimize_dqn(state_dim: int, action_dim: int,
                             run_name=run_name,
                             log_dir=log_dir,
                             max_episodes=max_episodes_sweep,
-                            save_figures=False,
                         )
                         res["run_name"] = run_name
                         res["depth"] = depth
@@ -471,7 +326,6 @@ if __name__ == "__main__":
         action_dim=action_dim,
         run_name="q2_3_layers",
         log_dir="runs/q2_3_layers",
-        save_figures=True,
     )
 
     # train 5-layer network with full plots
@@ -482,7 +336,6 @@ if __name__ == "__main__":
         action_dim=action_dim,
         run_name="q2_5_layers",
         log_dir="runs/q2_5_layers",
-        save_figures=True,
     )
 
     # run hyper-parameter sweep to tune the network
