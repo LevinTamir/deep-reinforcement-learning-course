@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 
 from utils import QNetwork, ReplayBuffer, build_network, sample_action, save_plots
 
-FIG_DIR = "DQN"
+FIG_DIR = "figs_q2"
 os.makedirs(FIG_DIR, exist_ok=True)
 
 def train_agent(
