@@ -9,7 +9,7 @@ import torch.nn as nn
 from utils import ReplayBuffer, build_network, sample_action, save_plots
 
 
-PLT_DIR = "figs_q3"
+PLT_DIR = "DDQN"
 os.makedirs(PLT_DIR, exist_ok=True)
 
 def train_agent(
