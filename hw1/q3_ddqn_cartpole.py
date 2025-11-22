@@ -165,7 +165,7 @@ if __name__ == "__main__":
         "batch_size": 128,
         "capacity": 10_000,
         "gamma": 0.999,
-        "max_epsilon": 0.9,
+        "max_epsilon": 1,
         "min_epsilon": 0.01,
         "epsilon_decay": 0.999,
         "target_update_period": 100,
