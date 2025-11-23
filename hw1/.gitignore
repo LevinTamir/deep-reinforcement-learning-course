@@ -1,7 +1,7 @@
 # Figures
-figs_q1/
-figs_q2/
-figs*/
+Tabular_Q_Learning/
+DQN/
+DDQN/
 *.png
 
 # TensorBoard logs
@@ -15,9 +15,6 @@ __pycache__/
 .env/
 .venv/
 *.egg-info/
-
-# Jupyter notebooks checkpoints (if any)
-.ipynb_checkpoints/
 
 # VSCode settings (optional)
 .vscode/

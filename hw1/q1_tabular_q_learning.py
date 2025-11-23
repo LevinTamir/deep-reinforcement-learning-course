@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
 
 # Directory for saved figures
-FIG_DIR = "figs_q1"
+FIG_DIR = "Tabular_Q_Learning"
 os.makedirs(FIG_DIR, exist_ok=True)
 
 
@@ -324,4 +324,4 @@ if __name__ == "__main__":
     writer.close()
 
     # Run sweep for comparison
-    Optimize_Q_Learning(num_episodes_sweep=5000)
+    # Optimize_Q_Learning(num_episodes_sweep=5000)

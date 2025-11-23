@@ -20,8 +20,8 @@ def train_agent(
     action_dim: int,
     run_name: str,
     log_dir: str,
-    max_episodes: int = 600,
-    max_steps: int = 500,
+    max_episodes: int = 500,
+    max_steps: int = 100,
     max_score: float = 475.0,
     random_seed: int = 42
 

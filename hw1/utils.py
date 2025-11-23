@@ -32,6 +32,56 @@ class QNetwork(nn.Module):
         return self.net(x)
 
 
+class DuelingQNetwork(nn.Module):
+    def __init__(self, state_dim: int, action_dim: int, hidden_size: int, num_hidden_layers: int):
+        super().__init__()
+        
+        # Common feature layer
+        layers = []
+        in_dim = state_dim
+        # Use num_hidden_layers - 1 for the shared part, or just keep it simple.
+        # Let's follow the standard pattern: shared layers -> split heads.
+        # If num_hidden_layers is e.g. 3, we can have 2 shared layers and then 1 layer for each head.
+        # Or we can just have a shared feature extractor.
+        
+        # Let's make the shared part have num_hidden_layers
+        for _ in range(num_hidden_layers):
+            layers.append(nn.Linear(in_dim, hidden_size))
+            layers.append(nn.ReLU())
+            in_dim = hidden_size
+            
+        self.feature_layer = nn.Sequential(*layers)
+        
+        # Value stream
+        self.value_stream = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, 1)
+        )
+        
+        # Advantage stream
+        self.advantage_stream = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, action_dim)
+        )
+
+        # Init weights
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_uniform_(m.weight, nonlinearity="relu")
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        features = self.feature_layer(x)
+        values = self.value_stream(features)
+        advantages = self.advantage_stream(features)
+        
+        # Q(s,a) = V(s) + (A(s,a) - mean(A(s,a')))
+        q_vals = values + (advantages - advantages.mean(dim=1, keepdim=True))
+        return q_vals
+
+
 def build_network(state_dim: int, action_dim: int,
                   lr: float, device, num_hidden_layers: int):
     
@@ -41,7 +91,16 @@ def build_network(state_dim: int, action_dim: int,
     return model, optimizer
 
 
-def sample_action(q_network: QNetwork,
+def build_dueling_network(state_dim: int, action_dim: int,
+                          lr: float, device, num_hidden_layers: int):
+    
+    model = DuelingQNetwork(state_dim, action_dim,
+                            hidden_size=128, num_hidden_layers=num_hidden_layers).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    return model, optimizer
+
+
+def sample_action(q_network: nn.Module,
                   state: np.ndarray,
                   epsilon: float,
                   action_dim: int,
