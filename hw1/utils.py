@@ -33,38 +33,31 @@ class QNetwork(nn.Module):
 
 
 class DuelingQNetwork(nn.Module):
-    def __init__(self, state_dim: int, action_dim: int, hidden_size: int, num_hidden_layers: int):
+    def __init__(self, state_dim: int, action_dim: int, hidden_sizes: list | int, num_hidden_layers: int = None):
         super().__init__()
+        
+        if isinstance(hidden_sizes, int):
+             # If hidden_sizes is an int, we assume uniform hidden size and use num_hidden_layers
+             if num_hidden_layers is None:
+                 raise ValueError("If hidden_sizes is an int, num_hidden_layers must be provided")
+             hidden_sizes = [hidden_sizes] * num_hidden_layers
         
         # Common feature layer
         layers = []
         in_dim = state_dim
-        # Use num_hidden_layers - 1 for the shared part, or just keep it simple.
-        # Let's follow the standard pattern: shared layers -> split heads.
-        # If num_hidden_layers is e.g. 3, we can have 2 shared layers and then 1 layer for each head.
-        # Or we can just have a shared feature extractor.
         
-        # Let's make the shared part have num_hidden_layers
-        for _ in range(num_hidden_layers):
-            layers.append(nn.Linear(in_dim, hidden_size))
+        for h_dim in hidden_sizes:
+            layers.append(nn.Linear(in_dim, h_dim))
             layers.append(nn.ReLU())
-            in_dim = hidden_size
+            in_dim = h_dim
             
         self.feature_layer = nn.Sequential(*layers)
         
         # Value stream
-        self.value_stream = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, 1)
-        )
+        self.value_stream = nn.Linear(hidden_sizes[-1], 1)
         
         # Advantage stream
-        self.advantage_stream = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, action_dim)
-        )
+        self.advantage_stream = nn.Linear(hidden_sizes[-1], action_dim)
 
         # Init weights
         for m in self.modules():
@@ -95,7 +88,7 @@ def build_dueling_network(state_dim: int, action_dim: int,
                           lr: float, device, num_hidden_layers: int):
     
     model = DuelingQNetwork(state_dim, action_dim,
-                            hidden_size=128, num_hidden_layers=num_hidden_layers).to(device)
+                            hidden_sizes=128, num_hidden_layers=num_hidden_layers).to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
     return model, optimizer
 

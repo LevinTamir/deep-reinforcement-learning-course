@@ -1,3 +1,4 @@
+from utils import save_plots
 import os
 import random
 
@@ -45,7 +46,6 @@ class DuelingQNetwork(nn.Module):
     def __init__(self, state_dim: int, action_dim: int, hidden_sizes: list):
         super().__init__()
         
-        # Shared feature extractor
         layers = []
         in_dim = state_dim
         for h_dim in hidden_sizes:
@@ -55,13 +55,10 @@ class DuelingQNetwork(nn.Module):
             
         self.features = nn.Sequential(*layers)
         
-        # Value stream
         self.value_stream = nn.Linear(hidden_sizes[-1], 1)
         
-        # Advantage stream
         self.advantage_stream = nn.Linear(hidden_sizes[-1], action_dim)
 
-        # He initialization
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_uniform_(m.weight, nonlinearity="relu")
@@ -72,7 +69,6 @@ class DuelingQNetwork(nn.Module):
         values = self.value_stream(features)
         advantages = self.advantage_stream(features)
         
-        # Q(s,a) = V(s) + (A(s,a) - mean(A(s,a)))
         q_vals = values + (advantages - advantages.mean(dim=1, keepdim=True))
         return q_vals
 
@@ -85,7 +81,6 @@ def build_network(state_dim: int, action_dim: int,
     elif num_hidden_layers == 3:
         hidden_sizes = [64, 64, 32]
     else:
-        # Fallback or default
         hidden_sizes = [128] * (num_hidden_layers if num_hidden_layers else 3)
 
     model = DuelingQNetwork(state_dim, action_dim, hidden_sizes).to(device)
@@ -107,39 +102,6 @@ def sample_action(q_network: DuelingQNetwork,
     return int(torch.argmax(q_vals, dim=1).item())
 
 
-def save_plots(losses, rewards, moving_avg, run_name: str):
-
-    x_loss = np.arange(len(losses))
-    x_ep = np.arange(len(rewards))
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(x_loss, losses)
-    plt.title(f"{run_name} step loss")
-    plt.xlabel("step num")
-    plt.ylabel("loss")
-    plt.tight_layout()
-    plt.savefig(os.path.join(PLT_DIR, f"{run_name}_step_loss.png"), dpi=200)
-    plt.close()
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(x_ep, rewards)
-    plt.title(f"{run_name} reward per episode")
-    plt.xlabel("episode")
-    plt.ylabel("total reward")
-    plt.tight_layout()
-    plt.savefig(os.path.join(PLT_DIR, f"{run_name}_reward.png"), dpi=200)
-    plt.close()
-
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(x_ep, moving_avg)
-    plt.title(f"{run_name} mean reward last 100 episodes")
-    plt.xlabel("episode")
-    plt.ylabel("mean reward")
-    plt.tight_layout()
-    plt.savefig(os.path.join(PLT_DIR, f"{run_name}_mean_reward_100.png"), dpi=200)
-    plt.close()
-
 
 def train_agent(
     num_hidden_layers: int,
@@ -152,7 +114,6 @@ def train_agent(
     max_score: float = 475.0,
     random_seed: int = 42
 ):
-
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"{run_name} using device: {device}")
@@ -277,7 +238,7 @@ def train_agent(
 
     env.close()
 
-    save_plots(episode_losses, episode_rewards, moving_avg_rewards, run_name)
+    save_plots(episode_losses, episode_rewards, moving_avg_rewards, run_name, PLT_DIR)
 
     best_mean_100 = max(moving_avg_rewards) if moving_avg_rewards else 0.0
 
@@ -325,11 +286,9 @@ if __name__ == "__main__":
         run_name="ddqn_5_layers",
     )
 
-    # Compare results
     r3 = np.array(res_3["episode_rewards"])
     r5 = np.array(res_5["episode_rewards"])
 
-    # Truncate to shorter length if needed
     min_len = min(len(r3), len(r5))
     r3 = r3[:min_len]
     r5 = r5[:min_len]
