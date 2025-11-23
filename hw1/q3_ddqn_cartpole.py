@@ -5,12 +5,141 @@ import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim as optim
 
-from utils import ReplayBuffer, build_network, sample_action, save_plots
-
+import matplotlib.pyplot as plt
 
 PLT_DIR = "DDQN"
 os.makedirs(PLT_DIR, exist_ok=True)
+
+class ReplayBuffer:
+
+    def __init__(self, capacity: int):
+        self.capacity = capacity
+        self.memory = []
+        self.position = 0
+
+    def store(self, experience):
+
+        if len(self.memory) < self.capacity:
+            self.memory.append(experience)
+        else:
+            self.memory[self.position % self.capacity] = experience
+        self.position += 1
+
+    def sample(self, batch_size: int):
+
+        batch = random.sample(self.memory, batch_size)
+        states = np.array([e[0] for e in batch], dtype=np.float32)
+        actions = np.array([e[1] for e in batch], dtype=np.int64)
+        next_states = np.array([e[2] for e in batch], dtype=np.float32)
+        rewards = np.array([e[3] for e in batch], dtype=np.float32)
+        not_dones = np.array([e[4] for e in batch], dtype=np.float32)
+        return states, actions, next_states, rewards, not_dones
+
+    def __len__(self):
+        return len(self.memory)
+
+
+class DuelingQNetwork(nn.Module):
+    def __init__(self, state_dim: int, action_dim: int, hidden_sizes: list):
+        super().__init__()
+        
+        # Shared feature extractor
+        layers = []
+        in_dim = state_dim
+        for h_dim in hidden_sizes:
+            layers.append(nn.Linear(in_dim, h_dim))
+            layers.append(nn.ReLU())
+            in_dim = h_dim
+            
+        self.features = nn.Sequential(*layers)
+        
+        # Value stream
+        self.value_stream = nn.Linear(hidden_sizes[-1], 1)
+        
+        # Advantage stream
+        self.advantage_stream = nn.Linear(hidden_sizes[-1], action_dim)
+
+        # He initialization
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_uniform_(m.weight, nonlinearity="relu")
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        features = self.features(x)
+        values = self.value_stream(features)
+        advantages = self.advantage_stream(features)
+        
+        # Q(s,a) = V(s) + (A(s,a) - mean(A(s,a)))
+        q_vals = values + (advantages - advantages.mean(dim=1, keepdim=True))
+        return q_vals
+
+
+def build_network(state_dim: int, action_dim: int,
+                  lr: float, device, num_hidden_layers: int = None):
+    
+    if num_hidden_layers == 5:
+        hidden_sizes = [64, 64, 32, 32, 16]
+    elif num_hidden_layers == 3:
+        hidden_sizes = [64, 64, 32]
+    else:
+        # Fallback or default
+        hidden_sizes = [128] * (num_hidden_layers if num_hidden_layers else 3)
+
+    model = DuelingQNetwork(state_dim, action_dim, hidden_sizes).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    return model, optimizer
+
+
+def sample_action(q_network: DuelingQNetwork,
+                  state: np.ndarray,
+                  epsilon: float,
+                  action_dim: int,
+                  device) -> int:
+
+    if random.random() < epsilon:
+        return random.randrange(action_dim)
+    state_t = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+    with torch.no_grad():
+        q_vals = q_network(state_t)
+    return int(torch.argmax(q_vals, dim=1).item())
+
+
+def save_plots(losses, rewards, moving_avg, run_name: str):
+
+    x_loss = np.arange(len(losses))
+    x_ep = np.arange(len(rewards))
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(x_loss, losses)
+    plt.title(f"{run_name} step loss")
+    plt.xlabel("step num")
+    plt.ylabel("loss")
+    plt.tight_layout()
+    plt.savefig(os.path.join(PLT_DIR, f"{run_name}_step_loss.png"), dpi=200)
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(x_ep, rewards)
+    plt.title(f"{run_name} reward per episode")
+    plt.xlabel("episode")
+    plt.ylabel("total reward")
+    plt.tight_layout()
+    plt.savefig(os.path.join(PLT_DIR, f"{run_name}_reward.png"), dpi=200)
+    plt.close()
+
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(x_ep, moving_avg)
+    plt.title(f"{run_name} mean reward last 100 episodes")
+    plt.xlabel("episode")
+    plt.ylabel("mean reward")
+    plt.tight_layout()
+    plt.savefig(os.path.join(PLT_DIR, f"{run_name}_mean_reward_100.png"), dpi=200)
+    plt.close()
+
 
 def train_agent(
     num_hidden_layers: int,
@@ -18,8 +147,8 @@ def train_agent(
     state_dim: int,
     action_dim: int,
     run_name: str,
-    max_episodes: int = 300,
-    max_steps: int = 100,
+    max_episodes: int = 600,
+    max_steps: int = 500,
     max_score: float = 475.0,
     random_seed: int = 42
 ):
@@ -55,6 +184,7 @@ def train_agent(
     episode_rewards = []
     moving_avg_rewards = []
     best_solved_episode = None
+    max_mean_reward = -float('inf')
 
     for episode in range(max_episodes):
         state, _ = env.reset()
@@ -69,8 +199,13 @@ def train_agent(
             done = terminated or truncated
             ep_reward += reward
 
-            not_done = 0.0 if done else 1.0
+            not_done = 0.0 if terminated else 1.0
             buffer.store((state, action, next_state, reward, not_done))
+
+            if done:
+                break
+
+            state = next_state
 
             epsilon = max(hp["min_epsilon"], epsilon * hp["epsilon_decay"])
 
@@ -108,9 +243,6 @@ def train_agent(
                 if total_steps % hp["target_update_period"] == 0:
                     target_net.load_state_dict(online_net.state_dict())
 
-            if done:
-                break
-
         episode_rewards.append(ep_reward)
 
         if len(episode_rewards) >= 100:
@@ -126,6 +258,12 @@ def train_agent(
             f"eps:{epsilon:.3f}"
         )
 
+        if mean_last_100 > max_mean_reward:
+            max_mean_reward = mean_last_100
+            save_path = os.path.join(PLT_DIR, f"{run_name}_best.pth")
+            torch.save(online_net.state_dict(), save_path)
+            print(f"  New best mean_100: {max_mean_reward:.1f} -> saved model to {save_path}")
+
         if mean_last_100 >= max_score and best_solved_episode is None and len(episode_rewards) >= 100:
             best_solved_episode = episode + 1
             print(
@@ -139,7 +277,7 @@ def train_agent(
 
     env.close()
 
-    save_plots(episode_losses, episode_rewards, moving_avg_rewards, run_name, PLT_DIR)
+    save_plots(episode_losses, episode_rewards, moving_avg_rewards, run_name)
 
     best_mean_100 = max(moving_avg_rewards) if moving_avg_rewards else 0.0
 
@@ -186,3 +324,33 @@ if __name__ == "__main__":
         action_dim=action_dim,
         run_name="ddqn_5_layers",
     )
+
+    # Compare results
+    r3 = np.array(res_3["episode_rewards"])
+    r5 = np.array(res_5["episode_rewards"])
+
+    # Truncate to shorter length if needed
+    min_len = min(len(r3), len(r5))
+    r3 = r3[:min_len]
+    r5 = r5[:min_len]
+
+    diff = r5 - r3
+    
+    plt.figure(figsize=(10, 6))
+    plt.plot(diff, label="5-Layer - 3-Layer Reward Difference", color='purple')
+    plt.axhline(0, color='black', linestyle='--', alpha=0.5)
+    plt.title("Reward Difference (5-Layer minus 3-Layer)")
+    plt.xlabel("Episode")
+    plt.ylabel("Reward Difference")
+    plt.legend()
+    plt.tight_layout()
+    save_path = os.path.join(PLT_DIR, "reward_difference.png")
+    plt.savefig(save_path, dpi=200)
+    plt.close()
+    
+    print(f"\nComparison Plot Saved to: {save_path}")
+    print(f"Total Absolute Difference: {np.sum(np.abs(diff)):.1f}")
+    if np.sum(np.abs(diff)) == 0:
+        print("WARNING: Runs are IDENTICAL.")
+    else:
+        print("SUCCESS: Runs are DIFFERENT.")

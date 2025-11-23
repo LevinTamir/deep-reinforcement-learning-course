@@ -73,14 +73,12 @@ def train_agent(
             done = terminated or truncated
             ep_reward += reward
 
-            not_done = 0.0 if done else 1.0
+            not_done = 0.0 if terminated else 1.0
             buffer.store((state, action, next_state, reward, not_done))
             state = next_state
 
-            # epsilon decay per step
             epsilon = max(hp["min_epsilon"], epsilon * hp["epsilon_decay"])
 
-            # update only if enough samples
             if len(buffer) >= hp["batch_size"]:
                 states, actions, next_states, rewards, not_dones = buffer.sample(
                     hp["batch_size"]
@@ -108,7 +106,6 @@ def train_agent(
                 writer.add_scalar(f"{run_name}/loss_step", loss.item(), total_steps)
                 episode_losses.append(loss.item())
 
-                # update target network every C steps
                 if total_steps % hp["target_update_period"] == 0:
                     target_net.load_state_dict(online_net.state_dict())
 
@@ -141,7 +138,6 @@ def train_agent(
                 f"(mean reward ≥ {max_score} over 100 episodes)"
             )
 
-        # run ~50 more episodes after solve and then stop
         if best_solved_episode is not None and episode - best_solved_episode > 50:
             print(f"{run_name} stopping 50 episodes after solve")
             break
@@ -191,26 +187,21 @@ def test_agent(q_network: QNetwork, episodes: int = 5, render: bool = False):
 
 def optimize_dqn(state_dim: int, action_dim: int,
                  max_episodes_sweep: int = 600):
-    '''
-    Run a small hyper-parameter sweep for 3 and 5 layer DQNs.
-    
-    '''
 
-    # search ranges from the assignment
     lrs = [1e-4, 1e-5]
     gammas = [0.99, 0.999]
     batch_sizes = [64, 128]
     target_periods = [100, 200]
 
     base_hp = {
-        "lr": 1e-4,             # will be overwritten
-        "batch_size": 128,      # will be overwritten
-        "capacity": 10_000,
-        "gamma": 0.99,          # will be overwritten
+        "lr": 1e-4,             
+        "batch_size": 128,     
+        "capacity": 50_000,
+        "gamma": 0.99,          
         "max_epsilon": 1.0,
         "min_epsilon": 0.01,
-        "epsilon_decay": 0.999,
-        "target_update_period": 100,  # will be overwritten
+        "epsilon_decay": 0.9999,
+        "target_update_period": 1000,  
     }
 
     results = []
@@ -244,10 +235,8 @@ def optimize_dqn(state_dim: int, action_dim: int,
                         res["hp"] = hp
                         results.append(res)
 
-    # sort by best mean reward over 100 episodes
     results.sort(key=lambda r: r["best_mean_100"], reverse=True)
 
-    # print top few configurations
     print("\nTop 5 configurations by best mean_100:")
     for r in results[:5]:
         hp = r["hp"]
@@ -257,12 +246,11 @@ def optimize_dqn(state_dim: int, action_dim: int,
             f"lr={hp['lr']} gamma={hp['gamma']} bs={hp['batch_size']} tu={hp['target_update_period']}"
         )
 
-    # 1) plot mean_100 curves for ALL runs (no legend)
     plt.figure(figsize=(10, 6))
     for r in results:
         x = np.arange(len(r["moving_avg_rewards"]))
         plt.plot(x, r["moving_avg_rewards"], alpha=0.3)
-    plt.title("Q2 – Mean Reward (Last 100 Episodes) – All DQN Configurations")
+    plt.title("Mean Reward (Last 100 Episodes) All DQN Configurations")
     plt.xlabel("Episode")
     plt.ylabel("Mean Reward (last 100)")
     plt.tight_layout()
@@ -271,7 +259,6 @@ def optimize_dqn(state_dim: int, action_dim: int,
     plt.close()
     print(f"Saved sweep figure (all configs) to {all_fig}")
 
-    # 2) plot mean_100 curves for the best few runs (with legend)
     top_k = min(5, len(results))
     plt.figure(figsize=(10, 6))
     for r in results[:top_k]:
@@ -296,29 +283,24 @@ def optimize_dqn(state_dim: int, action_dim: int,
 
 
 if __name__ == "__main__":
-    '''
-    Entry point: trains final 3- and 5-layer DQNs and (optionally) runs a sweep.
-    
-    '''
+
 
     env = gym.make("CartPole-v1")
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.n
     env.close()
 
-    # hyperparameters chosen for the final solution (after running the sweep)
     best_hp = {
         "lr": 1e-4,
         "batch_size": 128,
-        "capacity": 10_000,
-        "gamma": 0.999,
+        "capacity": 50_000,
+        "gamma": 0.99,
         "max_epsilon": 0.9,
         "min_epsilon": 0.01,
-        "epsilon_decay": 0.999,
-        "target_update_period": 100,
+        "epsilon_decay": 0.9999,
+        "target_update_period": 1000,
     }
 
-    # train 3-layer network with full plots
     res_3 = train_agent(
         num_hidden_layers=3,
         hp=best_hp,
@@ -328,7 +310,6 @@ if __name__ == "__main__":
         log_dir="runs/q2_3_layers",
     )
 
-    # train 5-layer network with full plots
     res_5 = train_agent(
         num_hidden_layers=5,
         hp=best_hp,
@@ -337,6 +318,3 @@ if __name__ == "__main__":
         run_name="q2_5_layers",
         log_dir="runs/q2_5_layers",
     )
-
-    # run hyper-parameter sweep to tune the network
-    # optimize_dqn(state_dim=state_dim, action_dim=action_dim, max_episodes_sweep=600)

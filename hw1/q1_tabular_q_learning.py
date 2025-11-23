@@ -203,7 +203,7 @@ def Q_Learning(
                 writer.add_scalar("Q1/Mean_steps_100", mean_steps, episode + 1)
 
             print(
-                f"[{run_name}] Ep {episode+1}  avgR={mean_reward:.3f}  "
+                f"{run_name} Ep {episode+1}  avgR={mean_reward:.3f}  "
                 f"avgSteps={mean_steps:.1f}  eps={eps:.3f}"
             )
 
