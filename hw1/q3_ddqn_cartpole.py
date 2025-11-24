@@ -130,15 +130,12 @@ def train_agent(
             f"eps={epsilon:.3f}"
         )
 
-        if mean_last_100 >= max_score and best_solved_episode is None and len(episode_rewards) >= 100:
+        if mean_last_100 >= max_score and len(episode_rewards) >= 100:
             best_solved_episode = episode + 1
             print(
                 f"{run_name} solved after {best_solved_episode} episodes "
                 f"(mean reward ≥ {max_score} over 100 episodes)"
             )
-
-        if best_solved_episode is not None and episode - best_solved_episode > 50:
-            print(f"{run_name} stopping 50 episodes after solve")
             break
 
     env.close()
@@ -176,13 +173,13 @@ if __name__ == "__main__":
         "target_update_period": 100,
     }
 
-    res_3 = train_agent(
-        num_hidden_layers=3,
-        hp=best_hp,
-        state_dim=state_dim,
-        action_dim=action_dim,
-        run_name="ddqn_3_layers",
-    )
+    # res_3 = train_agent(
+    #     num_hidden_layers=3,
+    #     hp=best_hp,
+    #     state_dim=state_dim,
+    #     action_dim=action_dim,
+    #     run_name="ddqn_3_layers",
+    # )
 
     res_5 = train_agent(
         num_hidden_layers=5,

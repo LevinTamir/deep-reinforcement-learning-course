@@ -250,7 +250,7 @@ def Optimize_Q_Learning(num_episodes_sweep=1500, top_k=5):
             f"{'lin' if run.linear else 'exp'}_d={run.decay_factor}"
         )
 
-        writer = SummaryWriter(log_dir=f"runs/q1_sweep/{run_name}")
+        writer = SummaryWriter(log_dir=f"runs/tabularq_learning_sweep/{run_name}")
 
         _, _, _, avg_reward_100 = Q_Learning(
             writer=writer,
@@ -307,7 +307,7 @@ if __name__ == "__main__":
     linear = True
     decay_factor = 0.999
 
-    writer = SummaryWriter(log_dir="runs/q1_final")
+    writer = SummaryWriter(log_dir="runs/tabular_q_learning")
 
     # Save Q-tables and figures only for this configuration
     Q_Learning(

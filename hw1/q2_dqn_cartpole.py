@@ -6,7 +6,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
-import matplotlib.pyplot as plt
 
 from utils import QNetwork, ReplayBuffer, build_network, sample_action, save_plots, optimize_dqn
 
@@ -130,15 +129,12 @@ def train_agent(
             f"eps={epsilon:.3f}"
         )
 
-        if mean_last_100 >= max_score and best_solved_episode is None and len(episode_rewards) >= 100:
+        if mean_last_100 >= max_score and len(episode_rewards) >= 100:
             best_solved_episode = episode + 1
             print(
                 f"{run_name} solved after {best_solved_episode} episodes "
                 f"(mean reward ≥ {max_score} over 100 episodes)"
             )
-
-        if best_solved_episode is not None and episode - best_solved_episode > 50:
-            print(f"{run_name} stopping 50 episodes after solve")
             break
 
     env.close()
@@ -207,7 +203,7 @@ if __name__ == "__main__":
         hp=best_hp,
         state_dim=state_dim,
         action_dim=action_dim,
-        run_name="q2_3_layers",
+        run_name="dqn_3_layers",
     )
 
     res_5 = train_agent(
@@ -215,8 +211,8 @@ if __name__ == "__main__":
         hp=best_hp,
         state_dim=state_dim,
         action_dim=action_dim,
-        run_name="q2_5_layers",
+        run_name="dqn_5_layers",
     )
 
-    # if you want to run the sweep at some point:
+    # if you want to run the sweep:
     # optimize_dqn(train_agent, state_dim, action_dim, max_episodes_sweep=600, fig_dir=FIG_DIR)
