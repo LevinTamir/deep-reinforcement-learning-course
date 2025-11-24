@@ -7,6 +7,7 @@ from collections import deque
 import os
 import matplotlib.pyplot as plt
 
+
 class QNetwork(nn.Module):
 
     def __init__(self, state_dim: int, action_dim: int,
@@ -37,12 +38,10 @@ class DuelingQNetwork(nn.Module):
         super().__init__()
         
         if isinstance(hidden_sizes, int):
-             # If hidden_sizes is an int, we assume uniform hidden size and use num_hidden_layers
-             if num_hidden_layers is None:
-                 raise ValueError("If hidden_sizes is an int, num_hidden_layers must be provided")
-             hidden_sizes = [hidden_sizes] * num_hidden_layers
+            if num_hidden_layers is None:
+                raise ValueError("If hidden_sizes is an int, num_hidden_layers must be provided")
+            hidden_sizes = [hidden_sizes] * num_hidden_layers
         
-        # Common feature layer
         layers = []
         in_dim = state_dim
         
@@ -53,13 +52,9 @@ class DuelingQNetwork(nn.Module):
             
         self.feature_layer = nn.Sequential(*layers)
         
-        # Value stream
         self.value_stream = nn.Linear(hidden_sizes[-1], 1)
-        
-        # Advantage stream
         self.advantage_stream = nn.Linear(hidden_sizes[-1], action_dim)
 
-        # Init weights
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_uniform_(m.weight, nonlinearity="relu")
@@ -69,8 +64,6 @@ class DuelingQNetwork(nn.Module):
         features = self.feature_layer(x)
         values = self.value_stream(features)
         advantages = self.advantage_stream(features)
-        
-        # Q(s,a) = V(s) + (A(s,a) - mean(A(s,a')))
         q_vals = values + (advantages - advantages.mean(dim=1, keepdim=True))
         return q_vals
 
@@ -130,7 +123,6 @@ def save_plots(losses, rewards, moving_avg, run_name, PLT_DIR):
     plt.savefig(os.path.join(PLT_DIR, f"{run_name}_reward.png"), dpi=200)
     plt.close()
 
-    
     plt.figure(figsize=(8, 5))
     plt.plot(x_ep, moving_avg)
     plt.title(f"{run_name} mean reward last 100 episodes")
@@ -155,3 +147,103 @@ class ReplayBuffer:
 
     def __len__(self):
         return len(self.buffer)
+
+
+def optimize_dqn(train_agent_fn,
+                 state_dim: int,
+                 action_dim: int,
+                 max_episodes_sweep: int = 600,
+                 fig_dir: str = "DQN"):
+
+    lrs = [1e-4, 1e-5]
+    gammas = [0.99, 0.999]
+    batch_sizes = [64, 128]
+    target_periods = [100, 200]
+
+    base_hp = {
+        "lr": 1e-4,
+        "batch_size": 128,
+        "capacity": 50_000,
+        "gamma": 0.99,
+        "max_epsilon": 1.0,
+        "min_epsilon": 0.01,
+        "epsilon_decay": 0.9999,
+        "target_update_period": 100,
+    }
+
+    results = []
+
+    for depth in (3, 5):
+        for lr in lrs:
+            for gamma in gammas:
+                for bs in batch_sizes:
+                    for tu in target_periods:
+                        hp = base_hp.copy()
+                        hp["lr"] = lr
+                        hp["gamma"] = gamma
+                        hp["batch_size"] = bs
+                        hp["target_update_period"] = tu
+
+                        run_name = f"sweep_L{depth}_lr{lr}_g{gamma}_bs{bs}_tu{tu}"
+                        log_dir = f"runs/q2_sweep/{run_name}"
+
+                        print(f"\n=== starting sweep run: {run_name} ===")
+                        res = train_agent_fn(
+                            num_hidden_layers=depth,
+                            hp=hp,
+                            state_dim=state_dim,
+                            action_dim=action_dim,
+                            run_name=run_name,
+                            log_dir=log_dir,
+                            max_episodes=max_episodes_sweep,
+                        )
+                        res["run_name"] = run_name
+                        res["depth"] = depth
+                        res["hp"] = hp
+                        results.append(res)
+
+    results.sort(key=lambda r: r["best_mean_100"], reverse=True)
+
+    print("\nTop 5 configurations by best mean_100:")
+    for r in results[:5]:
+        hp = r["hp"]
+        print(
+            f"{r['run_name']} | depth={r['depth']} | "
+            f"best_mean_100={r['best_mean_100']:.2f} | "
+            f"lr={hp['lr']} gamma={hp['gamma']} bs={hp['batch_size']} tu={hp['target_update_period']}"
+        )
+
+    plt.figure(figsize=(10, 6))
+    for r in results:
+        x = np.arange(len(r["moving_avg_rewards"]))
+        plt.plot(x, r["moving_avg_rewards"], alpha=0.3)
+    plt.title("Mean Reward (Last 100 Episodes) All DQN Configurations")
+    plt.xlabel("Episode")
+    plt.ylabel("Mean Reward (last 100)")
+    plt.tight_layout()
+    all_fig = os.path.join(fig_dir, "q2_hyperparam_sweep_all.png")
+    plt.savefig(all_fig, dpi=200)
+    plt.close()
+    print(f"Saved sweep figure (all configs) to {all_fig}")
+
+    top_k = min(5, len(results))
+    plt.figure(figsize=(10, 6))
+    for r in results[:top_k]:
+        x = np.arange(len(r["moving_avg_rewards"]))
+        label = (
+            f"L{r['depth']}, lr={r['hp']['lr']}, "
+            f"g={r['hp']['gamma']}, bs={r['hp']['batch_size']}, tu={r['hp']['target_update_period']}"
+        )
+        plt.plot(x, r["moving_avg_rewards"], label=label)
+
+    plt.title("Q2 - Mean Reward (Last 100 Episodes) - Best DQN Configurations")
+    plt.xlabel("Episode")
+    plt.ylabel("Mean Reward (last 100)")
+    plt.legend(fontsize=7)
+    plt.tight_layout()
+    best_fig = os.path.join(fig_dir, "q2_hyperparam_sweep_best.png")
+    plt.savefig(best_fig, dpi=200)
+    plt.close()
+    print(f"Saved sweep comparison figure (best few) to {best_fig}")
+
+    return results

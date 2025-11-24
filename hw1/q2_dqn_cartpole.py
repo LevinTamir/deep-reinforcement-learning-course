@@ -8,10 +8,11 @@ import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
 
-from utils import QNetwork, ReplayBuffer, build_network, sample_action, save_plots
+from utils import QNetwork, ReplayBuffer, build_network, sample_action, save_plots, optimize_dqn
 
 FIG_DIR = "DQN"
 os.makedirs(FIG_DIR, exist_ok=True)
+
 
 def train_agent(
     num_hidden_layers: int,
@@ -19,17 +20,15 @@ def train_agent(
     state_dim: int,
     action_dim: int,
     run_name: str,
-    log_dir: str,
-    max_episodes: int = 500,
-    max_steps: int = 100,
+    log_dir: str = None,
+    max_episodes: int = 600,
+    max_steps: int = 500,
     max_score: float = 475.0,
     random_seed: int = 42
-
 ):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"{run_name} using device: {device}")
-
 
     random.seed(random_seed)
     np.random.seed(random_seed)
@@ -49,7 +48,7 @@ def train_agent(
     target_net.eval()
 
     buffer = ReplayBuffer(capacity=hp["capacity"])
-    writer = SummaryWriter(log_dir=log_dir)
+    writer = SummaryWriter(log_dir=log_dir if log_dir else f"runs/{run_name}")
 
     epsilon = hp["max_epsilon"]
     loss_fn = nn.MSELoss()
@@ -185,105 +184,7 @@ def test_agent(q_network: QNetwork, episodes: int = 5, render: bool = False):
     env.close()
 
 
-def optimize_dqn(state_dim: int, action_dim: int,
-                 max_episodes_sweep: int = 600):
-
-    lrs = [1e-4, 1e-5]
-    gammas = [0.99, 0.999]
-    batch_sizes = [64, 128]
-    target_periods = [100, 200]
-
-    base_hp = {
-        "lr": 1e-4,             
-        "batch_size": 128,     
-        "capacity": 50_000,
-        "gamma": 0.99,          
-        "max_epsilon": 1.0,
-        "min_epsilon": 0.01,
-        "epsilon_decay": 0.9999,
-        "target_update_period": 1000,  
-    }
-
-    results = []
-
-    for depth in (3, 5):
-        for lr in lrs:
-            for gamma in gammas:
-                for bs in batch_sizes:
-                    for tu in target_periods:
-                        hp = base_hp.copy()
-                        hp["lr"] = lr
-                        hp["gamma"] = gamma
-                        hp["batch_size"] = bs
-                        hp["target_update_period"] = tu
-
-                        run_name = f"sweep_L{depth}_lr{lr}_g{gamma}_bs{bs}_tu{tu}"
-                        log_dir = f"runs/q2_sweep/{run_name}"
-
-                        print(f"\n=== starting sweep run: {run_name} ===")
-                        res = train_agent(
-                            num_hidden_layers=depth,
-                            hp=hp,
-                            state_dim=state_dim,
-                            action_dim=action_dim,
-                            run_name=run_name,
-                            log_dir=log_dir,
-                            max_episodes=max_episodes_sweep,
-                        )
-                        res["run_name"] = run_name
-                        res["depth"] = depth
-                        res["hp"] = hp
-                        results.append(res)
-
-    results.sort(key=lambda r: r["best_mean_100"], reverse=True)
-
-    print("\nTop 5 configurations by best mean_100:")
-    for r in results[:5]:
-        hp = r["hp"]
-        print(
-            f"{r['run_name']} | depth={r['depth']} | "
-            f"best_mean_100={r['best_mean_100']:.2f} | "
-            f"lr={hp['lr']} gamma={hp['gamma']} bs={hp['batch_size']} tu={hp['target_update_period']}"
-        )
-
-    plt.figure(figsize=(10, 6))
-    for r in results:
-        x = np.arange(len(r["moving_avg_rewards"]))
-        plt.plot(x, r["moving_avg_rewards"], alpha=0.3)
-    plt.title("Mean Reward (Last 100 Episodes) All DQN Configurations")
-    plt.xlabel("Episode")
-    plt.ylabel("Mean Reward (last 100)")
-    plt.tight_layout()
-    all_fig = os.path.join(FIG_DIR, "q2_hyperparam_sweep_all.png")
-    plt.savefig(all_fig, dpi=200)
-    plt.close()
-    print(f"Saved sweep figure (all configs) to {all_fig}")
-
-    top_k = min(5, len(results))
-    plt.figure(figsize=(10, 6))
-    for r in results[:top_k]:
-        x = np.arange(len(r["moving_avg_rewards"]))
-        label = (
-            f"L{r['depth']}, lr={r['hp']['lr']}, "
-            f"g={r['hp']['gamma']}, bs={r['hp']['batch_size']}, tu={r['hp']['target_update_period']}"
-        )
-        plt.plot(x, r["moving_avg_rewards"], label=label)
-
-    plt.title("Q2 – Mean Reward (Last 100 Episodes) – Best DQN Configurations")
-    plt.xlabel("Episode")
-    plt.ylabel("Mean Reward (last 100)")
-    plt.legend(fontsize=7)
-    plt.tight_layout()
-    best_fig = os.path.join(FIG_DIR, "q2_hyperparam_sweep_best.png")
-    plt.savefig(best_fig, dpi=200)
-    plt.close()
-    print(f"Saved sweep comparison figure (best few) to {best_fig}")
-
-    return results
-
-
 if __name__ == "__main__":
-
 
     env = gym.make("CartPole-v1")
     state_dim = env.observation_space.shape[0]
@@ -293,12 +194,12 @@ if __name__ == "__main__":
     best_hp = {
         "lr": 1e-4,
         "batch_size": 128,
-        "capacity": 50_000,
-        "gamma": 0.99,
-        "max_epsilon": 0.9,
+        "capacity": 10_000,
+        "gamma": 0.999,
+        "max_epsilon": 1,
         "min_epsilon": 0.01,
-        "epsilon_decay": 0.9999,
-        "target_update_period": 1000,
+        "epsilon_decay": 0.999,
+        "target_update_period": 100,
     }
 
     res_3 = train_agent(
@@ -307,7 +208,6 @@ if __name__ == "__main__":
         state_dim=state_dim,
         action_dim=action_dim,
         run_name="q2_3_layers",
-        log_dir="runs/q2_3_layers",
     )
 
     res_5 = train_agent(
@@ -316,5 +216,7 @@ if __name__ == "__main__":
         state_dim=state_dim,
         action_dim=action_dim,
         run_name="q2_5_layers",
-        log_dir="runs/q2_5_layers",
     )
+
+    # if you want to run the sweep at some point:
+    # optimize_dqn(train_agent, state_dim, action_dim, max_episodes_sweep=600, fig_dir=FIG_DIR)
