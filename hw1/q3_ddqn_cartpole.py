@@ -173,18 +173,10 @@ if __name__ == "__main__":
         "target_update_period": 100,
     }
 
-    # res_3 = train_agent(
-    #     num_hidden_layers=3,
-    #     hp=best_hp,
-    #     state_dim=state_dim,
-    #     action_dim=action_dim,
-    #     run_name="ddqn_3_layers",
-    # )
-
-    res_5 = train_agent(
-        num_hidden_layers=5,
+    res_3 = train_agent(
+        num_hidden_layers=3,
         hp=best_hp,
         state_dim=state_dim,
         action_dim=action_dim,
-        run_name="ddqn_5_layers",
+        run_name="ddqn_3_layers",
     )
