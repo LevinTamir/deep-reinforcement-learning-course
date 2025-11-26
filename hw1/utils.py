@@ -14,11 +14,16 @@ import matplotlib.pyplot as plt
 
 
 class QNetwork(nn.Module):
+    '''
+    DQN network.
+    Maps state to Q-values for each action.
+    '''
 
     def __init__(self, state_dim: int, action_dim: int,
                  hidden_size: int, num_hidden_layers: int):
         super().__init__()
 
+        # Build hidden layers
         layers = []
         in_dim = state_dim
         for _ in range(num_hidden_layers):
@@ -29,6 +34,7 @@ class QNetwork(nn.Module):
         layers.append(nn.Linear(in_dim, action_dim))
         self.net = nn.Sequential(*layers)
 
+        # Initialize weights
         for m in self.net:
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_uniform_(m.weight, nonlinearity="relu")
@@ -39,14 +45,21 @@ class QNetwork(nn.Module):
 
 
 class DuelingQNetwork(nn.Module):
+    '''
+    Dueling DQN network.
+    Separates value and advantage streams, then combines them.
+    '''
+
     def __init__(self, state_dim: int, action_dim: int, hidden_sizes: list | int, num_hidden_layers: int = None):
         super().__init__()
         
+        # Handle hidden layer specification
         if isinstance(hidden_sizes, int):
             if num_hidden_layers is None:
                 raise ValueError("If hidden_sizes is an int, num_hidden_layers must be provided")
             hidden_sizes = [hidden_sizes] * num_hidden_layers
         
+        # Build shared feature layers
         layers = []
         in_dim = state_dim
         
@@ -57,9 +70,11 @@ class DuelingQNetwork(nn.Module):
             
         self.feature_layer = nn.Sequential(*layers)
         
+        # Separate value and advantage streams
         self.value_stream = nn.Linear(hidden_sizes[-1], 1)
         self.advantage_stream = nn.Linear(hidden_sizes[-1], action_dim)
 
+        # Initialize weights
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_uniform_(m.weight, nonlinearity="relu")
@@ -69,13 +84,16 @@ class DuelingQNetwork(nn.Module):
         features = self.feature_layer(x)
         values = self.value_stream(features)
         advantages = self.advantage_stream(features)
+        # Combine value and advantage: Q(s,a) = V(s) + A(s,a) - mean(A(s,a))
         q_vals = values + (advantages - advantages.mean(dim=1, keepdim=True))
         return q_vals
 
 
 def build_network(state_dim: int, action_dim: int,
                   lr: float, device, num_hidden_layers: int):
-    
+    '''
+    Create a standard Q-network and its optimizer.
+    '''
     model = QNetwork(state_dim, action_dim,
                      hidden_size=128, num_hidden_layers=num_hidden_layers).to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
@@ -84,7 +102,9 @@ def build_network(state_dim: int, action_dim: int,
 
 def build_dueling_network(state_dim: int, action_dim: int,
                           lr: float, device, num_hidden_layers: int):
-    
+    '''
+    Create a dueling Q-network and its optimizer.
+    '''
     model = DuelingQNetwork(state_dim, action_dim,
                             hidden_sizes=128, num_hidden_layers=num_hidden_layers).to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
@@ -96,7 +116,9 @@ def sample_action(q_network: nn.Module,
                   epsilon: float,
                   action_dim: int,
                   device) -> int:
-
+    '''
+    Epsilon-greedy action selection.
+    '''
     if random.random() < epsilon:
         return random.randrange(action_dim)
     state_t = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
@@ -106,7 +128,9 @@ def sample_action(q_network: nn.Module,
 
 
 def save_plots(losses, rewards, moving_avg, run_name, PLT_DIR):
-
+    '''
+    Save training plots: loss, reward, and moving average.
+    '''
     x_loss = np.arange(len(losses))
     x_ep = np.arange(len(rewards))
 
@@ -139,13 +163,19 @@ def save_plots(losses, rewards, moving_avg, run_name, PLT_DIR):
 
 
 class ReplayBuffer:
+    '''
+    Experience replay buffer for storing and sampling transitions.
+    '''
+
     def __init__(self, capacity: int):
         self.buffer = deque(maxlen=capacity)
 
     def store(self, transition):
+        '''Add a transition to the buffer.'''
         self.buffer.append(transition)
 
     def sample(self, batch_size: int):
+        '''Sample a random batch of transitions.'''
         batch = random.sample(self.buffer, batch_size)
         state, action, next_state, reward, done = zip(*batch)
         return np.array(state), np.array(action), np.array(next_state), np.array(reward), np.array(done)
@@ -159,7 +189,12 @@ def optimize_dqn(train_agent_fn,
                  action_dim: int,
                  max_episodes_sweep: int = 600,
                  fig_dir: str = "DQN"):
+    '''
+    Run hyperparameter sweep for DQN.
+    Tests combinations of learning rate, gamma, batch size, and target update period.
+    '''
 
+    # Hyperparameter grid
     lrs = [1e-4, 1e-5]
     gammas = [0.99, 0.999]
     batch_sizes = [64, 128]
@@ -178,6 +213,7 @@ def optimize_dqn(train_agent_fn,
 
     results = []
 
+    # Train all configurations
     for depth in (3, 5):
         for lr in lrs:
             for gamma in gammas:
@@ -207,6 +243,7 @@ def optimize_dqn(train_agent_fn,
                         res["hp"] = hp
                         results.append(res)
 
+    # Sort by performance
     results.sort(key=lambda r: r["best_mean_100"], reverse=True)
 
     print("\nTop 5 configurations by best mean_100:")
@@ -218,6 +255,7 @@ def optimize_dqn(train_agent_fn,
             f"lr={hp['lr']} gamma={hp['gamma']} bs={hp['batch_size']} tu={hp['target_update_period']}"
         )
 
+    # Plot all configurations
     plt.figure(figsize=(10, 6))
     for r in results:
         x = np.arange(len(r["moving_avg_rewards"]))
@@ -231,6 +269,7 @@ def optimize_dqn(train_agent_fn,
     plt.close()
     print(f"Saved sweep figure (all configs) to {all_fig}")
 
+    # Plot top configurations with labels
     top_k = min(5, len(results))
     plt.figure(figsize=(10, 6))
     for r in results[:top_k]:

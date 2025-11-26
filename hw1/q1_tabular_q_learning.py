@@ -32,7 +32,7 @@ class RunBuilder:
 
 def get_glie(num_episodes, max_epsilon, decay_factor, linear=True):
     '''
-    Create a GLIE epsilon schedule.
+    Create epsilon schedule.
     If linear=True: epsilon decreases linearly.
     If linear=False: epsilon decreases exponentially.
     '''
@@ -208,7 +208,7 @@ def Q_Learning(
                 f"avgSteps={mean_steps:.1f}  eps={eps:.3f}"
             )
 
-        # Snapshot Q-tables (only for the best configuration)
+        # Save Q-tables only for the best configuration
         if save_snapshots and (episode + 1) in (500, 2000):
             prefix = os.path.join(FIG_DIR, f"{run_name}_ep{episode+1}")
             plot_graphs(q_table, f"Q-table after {episode+1} episodes",
@@ -243,7 +243,7 @@ def Optimize_Q_Learning(num_episodes_sweep=1500, top_k=5):
         decay_factor=[0.99, 0.995, 0.999],
     )
 
-    results = []  # store (run_name, final_reward, x_values, y_values)
+    results = []
 
     for run in RunBuilder.get_runs(params):
         run_name = (
@@ -272,15 +272,15 @@ def Optimize_Q_Learning(num_episodes_sweep=1500, top_k=5):
 
         results.append((run_name, final_reward, x_axis, avg_reward_100))
 
-    # Sort runs by last mean reward (descending)
+    # Sort runs by last mean reward
     results.sort(key=lambda x: x[1], reverse=True)
 
-    # ---- Plot all curves faintly ----
+    # ---- Plot all curves faintly
     plt.figure(figsize=(12, 7))
     for run_name, _, x_vals, y_vals in results:
         plt.plot(x_vals, y_vals, color="gray", alpha=0.3, linewidth=1)
 
-    # ---- Highlight top-k curves ----
+    # ---- Highlight top-k curves
     for run_name, _, x_vals, y_vals in results[:top_k]:
         plt.plot(x_vals, y_vals, linewidth=2.5, label=run_name)
 
