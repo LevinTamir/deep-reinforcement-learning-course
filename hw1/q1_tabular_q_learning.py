@@ -1,5 +1,6 @@
 # ============================================
 # Section 1 – Tabular Q-Learning (FrozenLake-v1)
+# Mark Feldman (320827637) & Tamir Levin (315765347)
 # ============================================
 
 import os
@@ -283,7 +284,7 @@ def Optimize_Q_Learning(num_episodes_sweep=1500, top_k=5):
     for run_name, _, x_vals, y_vals in results[:top_k]:
         plt.plot(x_vals, y_vals, linewidth=2.5, label=run_name)
 
-    plt.title("Q1 – Mean Reward (Last 100 Episodes)\nTop Hyperparameter Configurations Highlighted")
+    plt.title("Q1 - Mean Reward (Last 100 Episodes)\nTop Hyperparameter Configurations Highlighted")
     plt.xlabel("Episode")
     plt.ylabel("Mean Reward (last 100)")
     plt.legend(fontsize=9)

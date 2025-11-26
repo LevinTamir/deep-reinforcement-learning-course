@@ -1,3 +1,8 @@
+# ============================================
+# Section 2 – DQN (CartPole-v1)
+# Mark Feldman (320827637) & Tamir Levin (315765347)
+# ============================================
+
 import os
 import random
 

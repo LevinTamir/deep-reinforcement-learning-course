@@ -1,3 +1,8 @@
+# ============================================
+# Utils file
+# Mark Feldman (320827637) & Tamir Levin (315765347)
+# ============================================
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
