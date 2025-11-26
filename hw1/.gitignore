@@ -3,6 +3,7 @@ Tabular_Q_Learning/
 DQN/
 DDQN/
 *.png
+*.zip
 
 # TensorBoard logs
 runs/
