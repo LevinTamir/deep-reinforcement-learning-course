@@ -17,6 +17,7 @@ import numpy as np
 import random
 import torch
 import torch.nn as nn
+from torch.optim.lr_scheduler import StepLR
 
 # -----------------------------
 # Config
@@ -26,14 +27,19 @@ class A2CConfig:
     env_name: str = "CartPole-v1"
 
     gamma: float = 0.99
-    lr_actor: float = 3e-4       # Adam-friendly learning rate
-    lr_critic: float = 1e-3      # Critic can learn faster
+    lr_actor: float = 2e-3        # Starting LR for actor
+    lr_critic: float = 1e-3       # Starting LR for critic
     hidden: int = 128
 
+    # Learning rate decay
+    lr_step_size: int = 40        # Decay every N episodes
+    lr_gamma: float = 0.7         # Decay factor
+    min_lr: float = 1e-4          # Minimum LR floor (prevents LR from vanishing)
+
     # Stabilizers
-    entropy_coef: float = 0.01   # Mild entropy bonus for exploration
+    entropy_coef: float = 0.01    # Mild entropy bonus for exploration
     value_loss_coef: float = 0.5
-    max_grad_norm: float = 0.5   # Gradient clipping
+    max_grad_norm: float = 0.5    # Gradient clipping
     normalize_advantages: bool = True  # Critical for stable training
 
     max_episodes: int = 2000
@@ -260,9 +266,13 @@ def train_a2c(cfg: A2CConfig) -> Tuple[List[float], int, float]:
     actor = Actor(obs_dim, act_dim, cfg.hidden)
     critic = Critic(obs_dim, cfg.hidden)
 
-    # Adam optimizer - more stable than RMSprop for this setup
+    # Adam optimizer
     opt_actor = torch.optim.Adam(actor.parameters(), lr=cfg.lr_actor)
     opt_critic = torch.optim.Adam(critic.parameters(), lr=cfg.lr_critic)
+
+    # Learning rate schedulers
+    scheduler_actor = StepLR(opt_actor, step_size=cfg.lr_step_size, gamma=cfg.lr_gamma)
+    scheduler_critic = StepLR(opt_critic, step_size=cfg.lr_step_size, gamma=cfg.lr_gamma)
 
     episode_returns: List[float] = []
     avg100_returns: List[float] = []  # Track avg100 for plotting
@@ -367,8 +377,19 @@ def train_a2c(cfg: A2CConfig) -> Tuple[List[float], int, float]:
         opt_actor.step()
         opt_critic.step()
 
+        # Step learning rate schedulers
+        scheduler_actor.step()
+        scheduler_critic.step()
+
+        # Clamp LR to minimum to prevent vanishing learning rate
+        for param_group in opt_actor.param_groups:
+            param_group['lr'] = max(param_group['lr'], cfg.min_lr)
+        for param_group in opt_critic.param_groups:
+            param_group['lr'] = max(param_group['lr'], cfg.min_lr)
+
         avg100 = float(np.mean(episode_returns[-100:])) if len(episode_returns) >= 100 else float("nan")
         avg100_returns.append(avg100)  # Track for plotting
+        current_lr = opt_actor.param_groups[0]['lr']  # Get current LR for logging
 
         # Periodic evaluation
         if (ep + 1) % cfg.eval_every == 0:
@@ -380,9 +401,9 @@ def train_a2c(cfg: A2CConfig) -> Tuple[List[float], int, float]:
 
         if (ep + 1) % cfg.print_every == 0:
             if len(episode_returns) >= 100:
-                print(f"ep={ep+1:4d}  ret={ep_ret:7.1f}  avg100={avg100:7.2f}  greedy={last_greedy:7.1f}")
+                print(f"ep={ep+1:4d}  ret={ep_ret:7.1f}  avg100={avg100:7.2f}  greedy={last_greedy:7.1f}  lr={current_lr:.1e}")
             else:
-                print(f"ep={ep+1:4d}  ret={ep_ret:7.1f}  greedy={last_greedy:7.1f}")
+                print(f"ep={ep+1:4d}  ret={ep_ret:7.1f}  greedy={last_greedy:7.1f}  lr={current_lr:.1e}")
 
         # Check solve condition
         if best_greedy >= cfg.solve_score:
@@ -416,17 +437,23 @@ def main():
     cfg = A2CConfig(
         env_name="CartPole-v1",
         gamma=0.99,
-        lr_actor=3e-4,
-        lr_critic=1e-3,
-        hidden=128,
         
-        entropy_coef=0.01,
+        # Optimized learning rates
+        lr_actor=3e-4,             # Stable for TD-based updates
+        lr_critic=1e-3,            # Critic learns faster
+        lr_step_size=500,          # Essentially no decay (step after training ends)
+        lr_gamma=0.9,              # Unused with step_size=500
+        min_lr=3e-4,               # Maintain constant LR
+        
+        hidden=128,                # Standard hidden size
+        
+        entropy_coef=0.01,         # Mild exploration
         value_loss_coef=0.5,
         max_grad_norm=0.5,
-        normalize_advantages=True,
+        normalize_advantages=True, # Critical for stability
         
         max_episodes=2000,
-        seed=543,
+        seed=543,                  # Use seed 543 as required
         print_every=10,
         eval_every=50,
         eval_episodes=10,
