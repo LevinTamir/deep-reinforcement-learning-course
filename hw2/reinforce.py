@@ -271,6 +271,8 @@ def train(cfg: TrainConfig):
 
         if solve_ep is None and len(train_returns) >= 100 and avg100 > 475.0:
             solve_ep = ep + 1
+            print(f"\n*** SOLVED at episode {solve_ep} with avg100={avg100:.2f} ***")
+            break
 
         log_probs = torch.stack(traj["log_probs"]).to(device)     # [T]
         entropies = torch.stack(traj["entropies"]).to(device)     # [T]
@@ -339,7 +341,7 @@ def train(cfg: TrainConfig):
                 f"eval_avg={avg_eval:8.2f}"
             )
 
-    tag = "baseline" if cfg.use_baseline else "vanilla"
+    tag = "baseline" if cfg.use_baseline else "without_baseline"
     plot_learning_curves(
         train_returns=train_returns,
         avg100_returns=avg100_returns,
@@ -367,9 +369,11 @@ if __name__ == "__main__":
     cfg = TrainConfig(
         env_name="CartPole-v1",
         use_baseline=False,
-        lr_actor=3e-4,            # safer for vanilla REINFORCE
-        entropy_coef=0.0,         # keep simple
+        lr_actor=8e-4,            # faster learning
+        entropy_coef=0.01,        # add exploration
         normalize_returns=True,   # variance reduction for vanilla
+        max_grad_norm=1.0,        # prevent gradient explosions
+        seed=123,                 # different seed for variation
         device="cpu",
     )
     train(cfg)
