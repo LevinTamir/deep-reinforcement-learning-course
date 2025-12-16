@@ -27,23 +27,23 @@ class A2CConfig:
     env_name: str = "CartPole-v1"
 
     gamma: float = 0.99
-    lr_actor: float = 2e-3        # Starting LR for actor
-    lr_critic: float = 1e-3       # Starting LR for critic
-    hidden: int = 128
+    lr_actor: float = 2e-3        # Higher for escaping bad init
+    lr_critic: float = 3e-3       # Fast critic bootstrap
+    hidden: int = 256             # More capacity to learn
 
-    # Learning rate decay
-    lr_step_size: int = 40        # Decay every N episodes
-    lr_gamma: float = 0.7         # Decay factor
-    min_lr: float = 1e-4          # Minimum LR floor (prevents LR from vanishing)
+    # Learning rate decay - very delayed
+    lr_step_size: int = 400       # Keep high LR longer
+    lr_gamma: float = 0.9         # Standard decay
+    min_lr: float = 5e-4          # Higher minimum
 
     # Stabilizers
-    entropy_coef: float = 0.01    # Mild entropy bonus for exploration
+    entropy_coef: float = 0.05    # MUCH more exploration for seed 123
     value_loss_coef: float = 0.5
-    max_grad_norm: float = 0.5    # Gradient clipping
+    max_grad_norm: float = 1.0    # Less restrictive
     normalize_advantages: bool = True  # Critical for stable training
 
     max_episodes: int = 2000
-    seed: int = 543
+    seed: int = 123               # Keep seed 123
 
     print_every: int = 10
     eval_every: int = 50
@@ -425,7 +425,7 @@ def train_a2c(cfg: A2CConfig) -> Tuple[List[float], int, float]:
         avg100_returns=avg100_returns,
         eval_returns=eval_returns,
         eval_every=cfg.eval_every,
-        out_path="plots/actor_critic_learning_curve.png",
+        out_path="plots/actor_critic.png",
         ma_window=50,
         title=f"Actor-Critic (TD-based) - {cfg.env_name}",
     )
@@ -438,22 +438,22 @@ def main():
         env_name="CartPole-v1",
         gamma=0.99,
         
-        # Best config (solved at 650)
-        lr_actor=5e-4,
-        lr_critic=2e-3,
-        lr_step_size=500,
+        # Aggressive config for seed 123
+        lr_actor=2e-3,            # High for escaping
+        lr_critic=3e-3,           # Fast bootstrap
+        lr_step_size=400,         # Keep high LR
         lr_gamma=0.9,
         min_lr=5e-4,
         
-        hidden=256,
+        hidden=256,               # More capacity
         
-        entropy_coef=0.02,
+        entropy_coef=0.05,        # VERY high exploration
         value_loss_coef=0.5,
-        max_grad_norm=0.5,
+        max_grad_norm=1.0,        # Less restrictive
         normalize_advantages=True,
         
         max_episodes=2000,
-        seed=123,                  # Try different seed
+        seed=123,
         print_every=10,
         eval_every=50,
         eval_episodes=10,
