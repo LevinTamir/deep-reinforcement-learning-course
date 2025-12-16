@@ -438,22 +438,22 @@ def main():
         env_name="CartPole-v1",
         gamma=0.99,
         
-        # Further optimized learning rates
-        lr_actor=5e-4,             # Slightly higher for faster learning
-        lr_critic=2e-3,            # Faster critic learning
-        lr_step_size=500,          # No decay
+        # Best config (solved at 650)
+        lr_actor=5e-4,
+        lr_critic=2e-3,
+        lr_step_size=500,
         lr_gamma=0.9,
         min_lr=5e-4,
         
-        hidden=256,                # Larger network
+        hidden=256,
         
-        entropy_coef=0.02,         # More exploration
+        entropy_coef=0.02,
         value_loss_coef=0.5,
         max_grad_norm=0.5,
         normalize_advantages=True,
         
         max_episodes=2000,
-        seed=543,
+        seed=123,                  # Try different seed
         print_every=10,
         eval_every=50,
         eval_episodes=10,
