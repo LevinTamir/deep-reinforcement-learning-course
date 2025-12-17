@@ -25,7 +25,7 @@ class TrainConfig:
     lr_actor: float = 2e-3
     lr_critic: float = 2e-3
 
-    hidden: int = 128
+    hidden: int = 256
     max_episodes: int = 2000
 
     # --- normalization knobs ---

@@ -445,7 +445,7 @@ def main():
         lr_gamma=0.9,
         min_lr=5e-4,
         
-        hidden=256,               # More capacity
+        hidden=128,               # More capacity
         
         entropy_coef=0.05,        # VERY high exploration
         value_loss_coef=0.5,
