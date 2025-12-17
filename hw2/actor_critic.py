@@ -1,17 +1,8 @@
 # actor_critic.py
-"""
-TD-Based Actor-Critic for CartPole-v1 (HW2 Section 2)
-
-Key difference from REINFORCE with Baseline:
-- Uses TD-error δ = r + γV(s') - V(s) as advantage estimate (not Monte-Carlo returns)
-- Updates are batched at episode end for stability (still TD-based advantages)
-- Normalizes advantages for stable training
-"""
 from dataclasses import dataclass
 from copy import deepcopy
 from pathlib import Path
 from typing import List, Optional, Tuple
-
 import matplotlib.pyplot as plt
 import numpy as np
 import random
@@ -19,31 +10,24 @@ import torch
 import torch.nn as nn
 from torch.optim.lr_scheduler import StepLR
 
-# -----------------------------
-# Config
-# -----------------------------
 @dataclass
 class A2CConfig:
     env_name: str = "CartPole-v1"
 
     gamma: float = 0.99
-    lr_actor: float = 2e-3        # Higher for escaping bad init
-    lr_critic: float = 3e-3       # Fast critic bootstrap
-    hidden: int = 128             # More capacity to learn
-
-    # Learning rate decay - very delayed
-    lr_step_size: int = 400       # Keep high LR longer
-    lr_gamma: float = 0.9         # Standard decay
-    min_lr: float = 5e-4          # Higher minimum
-
-    # Stabilizers
-    entropy_coef: float = 0.05    # MUCH more exploration for seed 123
+    lr_actor: float = 2e-3
+    lr_critic: float = 3e-3
+    hidden: int = 128
+    lr_step_size: int = 400
+    lr_gamma: float = 0.9
+    min_lr: float = 5e-4
+    entropy_coef: float = 0.05
     value_loss_coef: float = 0.5
-    max_grad_norm: float = 1.0    # Less restrictive
-    normalize_advantages: bool = True  # Critical for stable training
+    max_grad_norm: float = 1.0
+    normalize_advantages: bool = True
 
     max_episodes: int = 2000
-    seed: int = 123               # Keep seed 123
+    seed: int = 123
 
     print_every: int = 10
     eval_every: int = 50
@@ -51,9 +35,6 @@ class A2CConfig:
     solve_score: float = 475.0
 
 
-# -----------------------------
-# Models
-# -----------------------------
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     """Orthogonal initialization for weights, constant for bias."""
     torch.nn.init.orthogonal_(layer.weight, std)
@@ -93,9 +74,6 @@ class Critic(nn.Module):
         return self.net(x).squeeze(-1)
 
 
-# -----------------------------
-# Utilities
-# -----------------------------
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -157,13 +135,7 @@ def plot_learning_curves(
     ma_window: int = 50,
     title: str = "Actor-Critic learning curve",
 ) -> None:
-    """
-    Plots:
-      - Reward per episode
-      - Average reward over last 100 episodes
-      - (Optional) moving average of reward per episode
-      - Eval average reward every eval_every episodes
-    """
+
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -172,7 +144,6 @@ def plot_learning_curves(
 
     plt.figure(figsize=(12, 6))
 
-    # --- Subplot 1: Reward per episode ---
     plt.subplot(2, 1, 1)
     plt.plot(episodes, train_returns, alpha=0.4, label="Reward per episode")
     ma = moving_average(train_returns, ma_window)
@@ -185,7 +156,6 @@ def plot_learning_curves(
     plt.grid(True, alpha=0.3)
     plt.legend()
 
-    # --- Subplot 2: Avg reward over last 100 episodes + eval ---
     plt.subplot(2, 1, 2)
     plt.plot(episodes, avg100_returns, linewidth=2, label="Avg reward (last 100 episodes)")
     if len(eval_returns) > 0:
@@ -198,7 +168,6 @@ def plot_learning_curves(
     plt.tight_layout()
     plt.savefig(out, dpi=150)
     plt.close()
-    print(f"Saved learning curves to {out_path}")
 
 
 def compute_td_advantages(
@@ -208,17 +177,10 @@ def compute_td_advantages(
     dones: List[bool],
     gamma: float
 ) -> torch.Tensor:
-    """
-    Compute TD(0) advantages: δ_t = r_t + γ * V(s_{t+1}) * (1 - done) - V(s_t)
-    
-    This is the key difference from REINFORCE with Baseline:
-    - REINFORCE uses Monte-Carlo returns: A_t = G_t - V(s_t)
-    - Actor-Critic uses TD-error: δ_t = r + γV(s') - V(s)
-    """
+
     advantages = []
     for r, v, v_next, done in zip(rewards, values, next_values, dones):
-        # TD-error: δ = r + γV(s') - V(s)
-        # If done (terminated), V(s') = 0
+
         bootstrap = 0.0 if done else v_next.item()
         td_target = r + gamma * bootstrap
         td_error = td_target - v.item()
@@ -252,7 +214,7 @@ def evaluate_policy(cfg: A2CConfig, actor: Actor, episodes: int = 10) -> float:
 
 
 # -----------------------------
-# Training - TD-Based Actor-Critic
+# Training
 # -----------------------------
 def train_a2c(cfg: A2CConfig) -> Tuple[List[float], int, float]:
     set_seed(cfg.seed)
@@ -266,17 +228,15 @@ def train_a2c(cfg: A2CConfig) -> Tuple[List[float], int, float]:
     actor = Actor(obs_dim, act_dim, cfg.hidden)
     critic = Critic(obs_dim, cfg.hidden)
 
-    # Adam optimizer
     opt_actor = torch.optim.Adam(actor.parameters(), lr=cfg.lr_actor)
     opt_critic = torch.optim.Adam(critic.parameters(), lr=cfg.lr_critic)
 
-    # Learning rate schedulers
     scheduler_actor = StepLR(opt_actor, step_size=cfg.lr_step_size, gamma=cfg.lr_gamma)
     scheduler_critic = StepLR(opt_critic, step_size=cfg.lr_step_size, gamma=cfg.lr_gamma)
 
     episode_returns: List[float] = []
-    avg100_returns: List[float] = []  # Track avg100 for plotting
-    eval_returns: List[float] = []    # Track eval returns for plotting
+    avg100_returns: List[float] = []
+    eval_returns: List[float] = []
     solved_ep = -1
     best_greedy = -1e9
     best_actor_state = None
@@ -335,12 +295,11 @@ def train_a2c(cfg: A2CConfig) -> Tuple[List[float], int, float]:
         episode_returns.append(ep_ret)
 
         # Stack tensors
-        log_probs_t = torch.stack(log_probs)    # [T]
-        entropies_t = torch.stack(entropies)    # [T]
-        values_t = torch.stack(values)          # [T]
+        log_probs_t = torch.stack(log_probs)
+        entropies_t = torch.stack(entropies)
+        values_t = torch.stack(values)
         
         # Compute TD advantages: δ_t = r_t + γV(s_{t+1}) - V(s_t)
-        # This is the key Actor-Critic formulation (different from Monte-Carlo)
         advantages = compute_td_advantages(rewards, values, next_values, dones, cfg.gamma)
         
         # Normalize advantages for stable training
@@ -401,14 +360,23 @@ def train_a2c(cfg: A2CConfig) -> Tuple[List[float], int, float]:
 
         if (ep + 1) % cfg.print_every == 0:
             if len(episode_returns) >= 100:
-                print(f"ep={ep+1:4d}  ret={ep_ret:7.1f}  avg100={avg100:7.2f}  greedy={last_greedy:7.1f}  lr={current_lr:.1e}")
+                print(
+                    f"Episode {ep+1:5d} | "
+                    f"train_return={ep_ret:8.2f} | "
+                    f"avg100={avg100:8.2f} | "
+                    f"eval_avg={last_greedy:8.2f}"
+                )
             else:
-                print(f"ep={ep+1:4d}  ret={ep_ret:7.1f}  greedy={last_greedy:7.1f}  lr={current_lr:.1e}")
+                print(
+                    f"Episode {ep+1:5d} | "
+                    f"train_return={ep_ret:8.2f} | "
+                    f"eval_avg={last_greedy:8.2f}"
+                )
 
         # Check solve condition
         if best_greedy >= cfg.solve_score:
             solved_ep = ep + 1
-            print(f"SOLVED at episode {solved_ep} with best_greedy={best_greedy:.1f}")
+            print(f"\n*** SOLVED at episode {solved_ep} with avg100={avg100:.2f} ***")
             break
 
     env.close()
@@ -437,21 +405,16 @@ def main():
     cfg = A2CConfig(
         env_name="CartPole-v1",
         gamma=0.99,
-        
-        # Aggressive config for seed 123
-        lr_actor=2e-3,            # High for escaping
-        lr_critic=3e-3,           # Fast bootstrap
-        lr_step_size=400,         # Keep high LR
+        lr_actor=2e-3,
+        lr_critic=3e-3,
+        lr_step_size=400,
         lr_gamma=0.9,
         min_lr=5e-4,
-        
-        hidden=128,               # More capacity
-        
-        entropy_coef=0.05,        # VERY high exploration
+        hidden=128,
+        entropy_coef=0.05,
         value_loss_coef=0.5,
-        max_grad_norm=1.0,        # Less restrictive
+        max_grad_norm=1.0,
         normalize_advantages=True,
-        
         max_episodes=2000,
         seed=123,
         print_every=10,
