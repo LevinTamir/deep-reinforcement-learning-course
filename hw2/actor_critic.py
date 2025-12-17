@@ -29,7 +29,7 @@ class A2CConfig:
     gamma: float = 0.99
     lr_actor: float = 2e-3        # Higher for escaping bad init
     lr_critic: float = 3e-3       # Fast critic bootstrap
-    hidden: int = 256             # More capacity to learn
+    hidden: int = 128             # More capacity to learn
 
     # Learning rate decay - very delayed
     lr_step_size: int = 400       # Keep high LR longer
@@ -180,7 +180,7 @@ def plot_learning_curves(
         ma_x = np.arange(ma_window, ma_window + len(ma))
         plt.plot(ma_x, ma, linewidth=2, label=f"Reward (MA{ma_window})")
     plt.xlabel("Episode")
-    plt.ylabel("Return")
+    plt.ylabel("Reward")
     plt.title(title)
     plt.grid(True, alpha=0.3)
     plt.legend()
@@ -191,7 +191,7 @@ def plot_learning_curves(
     if len(eval_returns) > 0:
         plt.plot(eval_episodes, eval_returns, marker="o", linewidth=1.5, label="Eval avg return")
     plt.xlabel("Episode")
-    plt.ylabel("Return")
+    plt.ylabel("Reward")
     plt.grid(True, alpha=0.3)
     plt.legend()
 
