@@ -16,7 +16,6 @@ class A2CConfig:
 
     gamma: float = 0.99
     lr_actor: float = 2e-3
-
     lr_critic: float = 1e-3
     hidden: int = 256
 
@@ -31,7 +30,7 @@ class A2CConfig:
     normalize_advantages: bool = True
 
     max_episodes: int = 2000
-    seed: int = 123
+    seed: int = 543
 
     print_every: int = 10
     eval_every: int = 50
@@ -103,7 +102,13 @@ def plot_learning_curves(
     ma_window: int = 50,
     title: str = "Actor-Critic learning curve",
 ) -> None:
-
+    """
+    Plots:
+      - Reward per episode
+      - Average reward over last 100 episodes
+      - (Optional) moving average of reward per episode
+      - Eval average reward every eval_every episodes
+    """
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -136,6 +141,7 @@ def plot_learning_curves(
     plt.tight_layout()
     plt.savefig(out, dpi=150)
     plt.close()
+    print(f"Saved learning curves to {out_path}")
 
 
 def compute_td_advantages(
@@ -145,10 +151,17 @@ def compute_td_advantages(
     dones: list[bool],
     gamma: float
 ) -> torch.Tensor:
-
+    """
+    Compute TD(0) advantages: δ_t = r_t + γ * V(s_{t+1}) * (1 - done) - V(s_t)
+    
+    This is the key difference from REINFORCE with Baseline:
+    - REINFORCE uses Monte-Carlo returns: A_t = G_t - V(s_t)
+    - Actor-Critic uses TD-error: δ_t = r + γV(s') - V(s)
+    """
     advantages = []
     for r, v, v_next, done in zip(rewards, values, next_values, dones):
-
+        # TD-error: δ = r + γV(s') - V(s)
+        # If done (terminated), V(s') = 0
         bootstrap = 0.0 if done else v_next.item()
         td_target = r + gamma * bootstrap
         td_error = td_target - v.item()
@@ -184,7 +197,7 @@ def evaluate_policy(cfg: A2CConfig, actor: Actor, episodes: int = 10) -> float:
 
 
 # -----------------------------
-# Training
+# Training - TD-Based Actor-Critic
 # -----------------------------
 def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float]:
     set_seed(cfg.seed)
@@ -199,9 +212,11 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float]:
     actor = Actor(obs_dim, act_dim, cfg.hidden)
     critic = Critic(obs_dim, cfg.hidden)
 
+    # Adam optimizer
     opt_actor = torch.optim.Adam(actor.parameters(), lr=cfg.lr_actor)
     opt_critic = torch.optim.Adam(critic.parameters(), lr=cfg.lr_critic)
 
+    # Learning rate schedulers
     scheduler_actor = StepLR(opt_actor, step_size=cfg.lr_step_size, gamma=cfg.lr_gamma)
     scheduler_critic = StepLR(opt_critic, step_size=cfg.lr_step_size, gamma=cfg.lr_gamma)
 
@@ -265,11 +280,12 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float]:
         episode_returns.append(ep_ret)
 
         # Stack tensors
-        log_probs_t = torch.stack(log_probs)
-        entropies_t = torch.stack(entropies)
-        values_t = torch.stack(values)
+        log_probs_t = torch.stack(log_probs)    # [T]
+        entropies_t = torch.stack(entropies)    # [T]
+        values_t = torch.stack(values)          # [T]
         
         # Compute TD advantages: δ_t = r_t + γV(s_{t+1}) - V(s_t)
+        # This is the key Actor-Critic formulation (different from Monte-Carlo)
         advantages = compute_td_advantages(rewards, values, next_values, dones, cfg.gamma)
         
         # Normalize advantages for stable training
@@ -339,7 +355,7 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float]:
         # Check solve condition
         if best_greedy >= cfg.solve_score:
             solved_ep = ep + 1
-            print(f"\n*** SOLVED at episode {solved_ep} with avg100={avg100:.2f} ***")
+            print(f"SOLVED at episode {solved_ep} with best_greedy={best_greedy:.1f}")
             break
 
     env.close()
@@ -459,6 +475,7 @@ def main():
         value_loss_coef=0.25,
         max_grad_norm=1.0,
         normalize_advantages=True,
+        
         max_episodes=2000,
         seed=123,                  
         print_every=10,

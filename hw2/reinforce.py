@@ -2,9 +2,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+
 import gymnasium as gym
+
 from pathlib import Path
 import matplotlib.pyplot as plt
+
 from dataclasses import dataclass
 
 @dataclass
@@ -249,7 +252,6 @@ def train(cfg: TrainConfig):
 
         if solve_ep is None and len(train_returns) >= 100 and avg100 > 475.0:
             solve_ep = ep + 1
-
             print("SOLVED at episode", ep + 1)
             break
 
