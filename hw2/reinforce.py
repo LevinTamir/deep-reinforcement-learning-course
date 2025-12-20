@@ -1,6 +1,3 @@
-# reinforce.py
-from dataclasses import dataclass
-from typing import Dict, List, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
@@ -9,39 +6,26 @@ import gymnasium as gym
 from pathlib import Path
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
-from typing import Optional
 
 @dataclass
 class TrainConfig:
     env_name: str = "CartPole-v1"
-    seed: int = 0
+    seed: int = 123
     gamma: float = 0.99
 
-    # Paper used 0.002 for REINFORCE and 0.002/0.002 for baseline. [file:144]
     lr_actor: float = 2e-3
     lr_critic: float = 2e-3
 
-    hidden: int = 128
+    hidden: int = 256
     max_episodes: int = 2000
 
-    # --- normalization knobs ---
-    normalize_advantages: bool = True   # normalize A_t for actor update
-    normalize_returns: bool = False     # do NOT normalize critic target by default
-
-    # --- regularization/stability ---
     value_loss_coef: float = 0.5
-    entropy_coef: float = 0.01          # small entropy bonus often helps exploration
-    max_grad_norm: Optional[float] = 1.0  # None disables grad clipping
+    entropy_coef: float = 0.01
+    max_grad_norm: float | None = 1.0
 
-    # Which algorithm variant
     use_baseline: bool = False
 
     device: str = "cpu"
-
-def normalize(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """Standardize tensor to zero mean / unit std."""
-    return (x - x.mean()) / (x.std() + eps)
-
 
 def set_seed(seed: int) -> None:
     np.random.seed(seed)
@@ -49,7 +33,7 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-def compute_returns(rewards: List[float], gamma: float) -> torch.Tensor:
+def compute_returns(rewards: list[float], gamma: float) -> torch.Tensor:
     """
     Monte-Carlo discounted returns.
     Given rewards r_0..r_{T-1}, returns a tensor G_0..G_{T-1}.
@@ -122,7 +106,7 @@ def evaluate(policy: PolicyNet, env, episodes: int, device: str) -> float:
     return float(np.mean(returns))
 
 
-def run_episode(policy: PolicyNet, env, device: str) -> Dict[str, List]:
+def run_episode(policy: PolicyNet, env, device: str) -> dict[str, list]:
     """
     Collect one full trajectory:
     stores states, log_probs, rewards, and entropy terms.
@@ -159,7 +143,7 @@ def run_episode(policy: PolicyNet, env, device: str) -> Dict[str, List]:
     }
 
 
-def moving_average(x: List[float], window: int) -> np.ndarray:
+def moving_average(x: list[float], window: int) -> np.ndarray:
     """Simple moving average using convolution; returns an array shorter by window-1."""
     x = np.asarray(x, dtype=np.float32)
     if window <= 1 or len(x) < window:
@@ -167,16 +151,14 @@ def moving_average(x: List[float], window: int) -> np.ndarray:
     kernel = np.ones(window, dtype=np.float32) / window
     return np.convolve(x, kernel, mode="valid")
 
-
-
 def plot_learning_curves(
-    train_returns: List[float],
-    avg100_returns: List[float],
-    eval_returns: List[float],
+    train_returns: list[float],
+    avg100_returns: list[float],
+    eval_returns: list[float],
     eval_every: int,
-    out_path: str = "plots/reinforce_learning_curve.png",
-    ma_window: int = 50,
-    title: str = "REINFORCE learning curve",
+    out_path: str,
+    ma_window: int ,
+    title: str
 ) -> None:
     """
     Plots:
@@ -195,7 +177,6 @@ def plot_learning_curves(
 
     plt.figure(figsize=(12, 6))
 
-    # --- Subplot 1: Reward per episode ---
     plt.subplot(2, 1, 1)
     plt.plot(episodes, train_returns, alpha=0.4, label="Reward per episode")
     ma = moving_average(train_returns, ma_window)
@@ -208,7 +189,6 @@ def plot_learning_curves(
     plt.grid(True, alpha=0.3)
     plt.legend()
 
-    # --- Subplot 2: Avg reward over last 100 episodes + eval ---
     plt.subplot(2, 1, 2)
     plt.plot(episodes, avg100_returns, linewidth=2, label="Avg reward (last 100 episodes)")
     if len(eval_returns) > 0:
@@ -222,11 +202,15 @@ def plot_learning_curves(
     plt.savefig(out, dpi=150)
     plt.close()
 
-
-from typing import List, Optional
-
 def train(cfg: TrainConfig):
     set_seed(cfg.seed)
+
+    if cfg.use_baseline:
+        normalize_returns = False
+        normalize_advantages = True
+    else:
+        normalize_returns = True
+        normalize_advantages = False
 
     env = gym.make(cfg.env_name)
     eval_env = gym.make(cfg.env_name)
@@ -245,12 +229,11 @@ def train(cfg: TrainConfig):
         value = ValueNet(obs_dim, cfg.hidden).to(device)
         opt_critic = optim.Adam(value.parameters(), lr=cfg.lr_critic)
 
-    # --- tracking for plots and convergence (paper-style avg-last-100) [file:144] ---
-    train_returns: List[float] = []
-    avg100_returns: List[float] = []
-    eval_returns: List[float] = []
+    train_returns = []
+    avg100_returns = []
+    eval_returns = []
     eval_every = 25
-    solve_ep: Optional[int] = None
+    solve_ep = None
 
     for ep in range(cfg.max_episodes):
         traj = run_episode(policy, env, cfg.device)
@@ -258,7 +241,6 @@ def train(cfg: TrainConfig):
         train_return = float(sum(traj["rewards"]))
         train_returns.append(train_return)
 
-        # avg reward over last 100 episodes (for apples-to-apples with the report) [file:144]
         if len(train_returns) >= 100:
             avg100 = float(np.mean(train_returns[-100:]))
         else:
@@ -267,20 +249,19 @@ def train(cfg: TrainConfig):
 
         if solve_ep is None and len(train_returns) >= 100 and avg100 > 475.0:
             solve_ep = ep + 1
-            print(f"\n*** SOLVED at episode {solve_ep} with avg100={avg100:.2f} ***")
+
+            print("SOLVED at episode", ep + 1)
             break
 
-        log_probs = torch.stack(traj["log_probs"]).to(device)     # [T]
-        entropies = torch.stack(traj["entropies"]).to(device)     # [T]
-        states = torch.stack(traj["states"]).to(device)           # [T, obs_dim]
+        log_probs = torch.stack(traj["log_probs"]).to(device)
+        entropies = torch.stack(traj["entropies"]).to(device)
+        states = torch.stack(traj["states"]).to(device)
 
-        # Always compute raw Monte-Carlo returns
-        returns_raw = compute_returns(traj["rewards"], cfg.gamma).to(device)  # [T]
+        returns_raw = compute_returns(traj["rewards"], cfg.gamma).to(device)
 
         if not cfg.use_baseline:
-            # Vanilla REINFORCE: may optionally normalize returns for stability
-            if cfg.normalize_returns:
-                returns_for_actor = normalize(returns_raw)
+            if normalize_returns:
+                returns_for_actor = (returns_raw - returns_raw.mean()) / (returns_raw.std() + 1e-8)
             else:
                 returns_for_actor = returns_raw
 
@@ -295,14 +276,11 @@ def train(cfg: TrainConfig):
             opt_actor.step()
 
         else:
-            # --- Baseline variant (faster/stabler) ---
-            # Critic predicts V(s); train it on RAW returns (stable target scale)
-            values = value(states)                       # [T]
-            advantages = returns_raw - values            # [T]
+            values = value(states)
+            advantages = returns_raw - values
 
-            # Normalize advantages for the actor only (variance reduction)
-            if cfg.normalize_advantages:
-                advantages_for_actor = normalize(advantages.detach())
+            if normalize_advantages:
+                advantages_for_actor = (advantages.detach() - advantages.detach().mean()) / (advantages.detach().std() + 1e-8)
             else:
                 advantages_for_actor = advantages.detach()
 
@@ -310,11 +288,7 @@ def train(cfg: TrainConfig):
             value_loss = 0.5 * ((returns_raw.detach() - values) ** 2).sum()
             entropy_bonus = entropies.sum()
 
-            total_loss = (
-                policy_loss
-                + cfg.value_loss_coef * value_loss
-                - cfg.entropy_coef * entropy_bonus
-            )
+            total_loss = (policy_loss + cfg.value_loss_coef * value_loss - cfg.entropy_coef * entropy_bonus)
 
             opt_actor.zero_grad()
             opt_critic.zero_grad()
@@ -337,7 +311,8 @@ def train(cfg: TrainConfig):
                 f"eval_avg={avg_eval:8.2f}"
             )
 
-    tag = "baseline" if cfg.use_baseline else "without_baseline"
+    tag = "with_baseline" if cfg.use_baseline else "without_baseline"
+
     plot_learning_curves(
         train_returns=train_returns,
         avg100_returns=avg100_returns,
@@ -347,6 +322,19 @@ def train(cfg: TrainConfig):
         ma_window=50,
         title=f"REINFORCE ({tag}) - {cfg.env_name}",
     )
+
+    # Save results for comparison
+    results_dir = Path("results")
+    results_dir.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        results_dir / f"reinforce_{tag}.npz",
+        train_returns=np.array(train_returns),
+        avg100_returns=np.array(avg100_returns),
+        eval_returns=np.array(eval_returns),
+        eval_every=eval_every,
+        solved_ep=solve_ep if solve_ep is not None else -1,
+    )
+    print(f"Results saved to results/reinforce_{tag}.npz")
 
     env.close()
     eval_env.close()
@@ -365,11 +353,8 @@ if __name__ == "__main__":
     cfg = TrainConfig(
         env_name="CartPole-v1",
         use_baseline=False,
-        lr_actor=8e-4,            # faster learning
-        entropy_coef=0.01,        # add exploration
-        normalize_returns=True,   # variance reduction for vanilla
-        max_grad_norm=1.0,        # prevent gradient explosions
-        seed=123,                 # different seed for variation
+        lr_actor=3e-4,
+        entropy_coef=0.0,
         device="cpu",
     )
     train(cfg)
@@ -380,11 +365,9 @@ if __name__ == "__main__":
     cfg = TrainConfig(
         env_name="CartPole-v1",
         use_baseline=True,
-        lr_actor=2e-3,            # paper-like [file:144]
-        lr_critic=2e-3,           # paper-like [file:144]
-        entropy_coef=0.01,        # mild exploration helper
-        normalize_advantages=True,
-        normalize_returns=False,  # critic fits raw returns
+        lr_actor=5e-4,
+        lr_critic=1e-3,
+        entropy_coef=0.01,
         device="cpu",
     )
     train(cfg)

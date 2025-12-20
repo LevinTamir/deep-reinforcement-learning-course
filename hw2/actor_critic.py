@@ -1,14 +1,14 @@
-# actor_critic.py
 from dataclasses import dataclass
 from copy import deepcopy
 from pathlib import Path
-from typing import List, Optional, Tuple
+
 import matplotlib.pyplot as plt
 import numpy as np
 import random
 import torch
 import torch.nn as nn
 from torch.optim.lr_scheduler import StepLR
+import gymnasium as gym
 
 @dataclass
 class A2CConfig:
@@ -16,14 +16,18 @@ class A2CConfig:
 
     gamma: float = 0.99
     lr_actor: float = 2e-3
-    lr_critic: float = 3e-3
-    hidden: int = 128
-    lr_step_size: int = 400
-    lr_gamma: float = 0.9
-    min_lr: float = 5e-4
-    entropy_coef: float = 0.05
+
+    lr_critic: float = 1e-3
+    hidden: int = 256
+
+    #learning rate decay
+    lr_step_size: int = 40
+    lr_gamma: float = 0.7
+    min_lr: float = 1e-4
+
+    entropy_coef: float = 0.01
     value_loss_coef: float = 0.5
-    max_grad_norm: float = 1.0
+    max_grad_norm: float = 0.5
     normalize_advantages: bool = True
 
     max_episodes: int = 2000
@@ -51,8 +55,7 @@ class Actor(nn.Module):
             nn.Tanh(),
             layer_init(nn.Linear(hidden, hidden)),
             nn.Tanh(),
-            layer_init(nn.Linear(hidden, act_dim), std=0.01),  # Small std for near-uniform initial policy
-        )
+            layer_init(nn.Linear(hidden, act_dim), std=0.01))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
@@ -67,8 +70,7 @@ class Critic(nn.Module):
             nn.Tanh(),
             layer_init(nn.Linear(hidden, hidden)),
             nn.Tanh(),
-            layer_init(nn.Linear(hidden, 1), std=1.0),
-        )
+            layer_init(nn.Linear(hidden, 1), std=1.0))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x).squeeze(-1)
@@ -80,44 +82,11 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
 
 
-def make_env(env_name: str):
-    try:
-        import gymnasium as gym
-        return gym.make(env_name), "gymnasium"
-    except Exception:
-        import gym
-        return gym.make(env_name), "gym"
-
-
-def reset_env(env, api: str, seed: Optional[int] = None):
-    if api == "gymnasium":
-        obs, _info = env.reset(seed=seed)
-        return obs
-    else:
-        if seed is not None:
-            try:
-                env.reset(seed=seed)
-            except TypeError:
-                pass
-        obs = env.reset()
-        return obs
-
-
 def step_env(env, api: str, action: int):
-    if api == "gymnasium":
-        obs2, reward, terminated, truncated, info = env.step(action)
-        return obs2, float(reward), bool(terminated), bool(truncated), info
-    else:
-        obs2, reward, done, info = env.step(action)
-        return obs2, float(reward), bool(done), False, info
+    obs2, reward, terminated, truncated, info = env.step(action)
+    return obs2, float(reward), bool(terminated), bool(truncated), info
 
-
-def normalize(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """Standardize tensor to zero mean / unit std."""
-    return (x - x.mean()) / (x.std() + eps)
-
-
-def moving_average(x: List[float], window: int) -> np.ndarray:
+def moving_average(x: list[float], window: int) -> np.ndarray:
     """Simple moving average using convolution; returns an array shorter by window-1."""
     x = np.asarray(x, dtype=np.float32)
     if window <= 1 or len(x) < window:
@@ -125,11 +94,10 @@ def moving_average(x: List[float], window: int) -> np.ndarray:
     kernel = np.ones(window, dtype=np.float32) / window
     return np.convolve(x, kernel, mode="valid")
 
-
 def plot_learning_curves(
-    train_returns: List[float],
-    avg100_returns: List[float],
-    eval_returns: List[float],
+    train_returns: list[float],
+    avg100_returns: list[float],
+    eval_returns: list[float],
     eval_every: int,
     out_path: str = "plots/actor_critic_learning_curve.png",
     ma_window: int = 50,
@@ -171,10 +139,10 @@ def plot_learning_curves(
 
 
 def compute_td_advantages(
-    rewards: List[float],
-    values: List[torch.Tensor],
-    next_values: List[torch.Tensor],
-    dones: List[bool],
+    rewards: list[float],
+    values: list[torch.Tensor],
+    next_values: list[torch.Tensor],
+    dones: list[bool],
     gamma: float
 ) -> torch.Tensor:
 
@@ -193,10 +161,12 @@ def evaluate_policy(cfg: A2CConfig, actor: Actor, episodes: int = 10) -> float:
     """Evaluate policy using greedy (argmax) action selection."""
     was_training = actor.training
     actor.eval()
-    env, api = make_env(cfg.env_name)
+    env = gym.make(cfg.env_name)
+    api = "gymnasium"
+
     returns = []
     for i in range(episodes):
-        obs = reset_env(env, api, seed=cfg.seed + 10000 + i)
+        obs, _ = env.reset(seed=cfg.seed + 10000 + i)
         done = False
         ep_ret = 0.0
         while not done:
@@ -216,11 +186,12 @@ def evaluate_policy(cfg: A2CConfig, actor: Actor, episodes: int = 10) -> float:
 # -----------------------------
 # Training
 # -----------------------------
-def train_a2c(cfg: A2CConfig) -> Tuple[List[float], int, float]:
+def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float]:
     set_seed(cfg.seed)
 
-    env, api = make_env(cfg.env_name)
-    obs = reset_env(env, api, seed=cfg.seed)
+    env = gym.make(cfg.env_name)
+    api =  "gymnasium"
+    obs, _ = env.reset(seed=cfg.seed)
 
     obs_dim = int(np.asarray(obs).shape[0])
     act_dim = int(env.action_space.n)
@@ -234,16 +205,16 @@ def train_a2c(cfg: A2CConfig) -> Tuple[List[float], int, float]:
     scheduler_actor = StepLR(opt_actor, step_size=cfg.lr_step_size, gamma=cfg.lr_gamma)
     scheduler_critic = StepLR(opt_critic, step_size=cfg.lr_step_size, gamma=cfg.lr_gamma)
 
-    episode_returns: List[float] = []
-    avg100_returns: List[float] = []
-    eval_returns: List[float] = []
+    episode_returns = []
+    avg100_returns = []  # Track avg100 for plotting
+    eval_returns = []    # Track eval returns for plotting
     solved_ep = -1
     best_greedy = -1e9
     best_actor_state = None
     last_greedy = float("nan")
 
     for ep in range(cfg.max_episodes):
-        obs = reset_env(env, api, seed=cfg.seed + ep)
+        obs, _ = env.reset(seed=cfg.seed + ep)
         done = False
 
         # Collect episode trajectory
@@ -258,7 +229,6 @@ def train_a2c(cfg: A2CConfig) -> Tuple[List[float], int, float]:
 
         while not done:
             obs_t = torch.as_tensor(obs, dtype=torch.float32)
-            
             # Actor: sample action
             logits = actor(obs_t)
             dist = torch.distributions.Categorical(logits=logits)
@@ -304,7 +274,7 @@ def train_a2c(cfg: A2CConfig) -> Tuple[List[float], int, float]:
         
         # Normalize advantages for stable training
         if cfg.normalize_advantages and len(advantages) > 1:
-            advantages = normalize(advantages)
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # === Actor Loss ===
         # L_actor = -E[log π(a|s) * δ] - entropy_coef * H(π)
@@ -357,21 +327,14 @@ def train_a2c(cfg: A2CConfig) -> Tuple[List[float], int, float]:
             if last_greedy > best_greedy:
                 best_greedy = last_greedy
                 best_actor_state = deepcopy(actor.state_dict())
-
-        if (ep + 1) % cfg.print_every == 0:
-            if len(episode_returns) >= 100:
-                print(
-                    f"Episode {ep+1:5d} | "
-                    f"train_return={ep_ret:8.2f} | "
-                    f"avg100={avg100:8.2f} | "
-                    f"eval_avg={last_greedy:8.2f}"
-                )
-            else:
-                print(
-                    f"Episode {ep+1:5d} | "
-                    f"train_return={ep_ret:8.2f} | "
-                    f"eval_avg={last_greedy:8.2f}"
-                )
+            
+            # Print in REINFORCE style
+            print(
+                f"Episode {ep+1:5d} | "
+                f"train_return={ep_ret:8.2f} | "
+                f"avg100={avg100:8.2f} | "
+                f"eval_avg={last_greedy:8.2f}"
+            )
 
         # Check solve condition
         if best_greedy >= cfg.solve_score:
@@ -398,25 +361,106 @@ def train_a2c(cfg: A2CConfig) -> Tuple[List[float], int, float]:
         title=f"Actor-Critic (TD-based) - {cfg.env_name}",
     )
     
+    # Save results for comparison
+    results_dir = Path("results")
+    results_dir.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        results_dir / "actor_critic.npz",
+        train_returns=np.array(episode_returns),
+        avg100_returns=np.array(avg100_returns),
+        eval_returns=np.array(eval_returns),
+        eval_every=cfg.eval_every,
+        solved_ep=solved_ep if solved_ep != -1 else -1,
+        best_greedy=best_greedy,
+    )
+    print(f"Results saved to results/actor_critic.npz")
+    
     return episode_returns, solved_ep, best_greedy
+
+
+def plot_comparison() -> None:
+    """Load results from all algorithms and create comparison plots."""
+    results_dir = Path("results")
+    
+    # Check if all result files exist
+    files = {
+        "REINFORCE (no baseline)": results_dir / "reinforce_without_baseline.npz",
+        "REINFORCE (with baseline)": results_dir / "reinforce_with_baseline.npz",
+        "Actor-Critic (TD)": results_dir / "actor_critic.npz",
+    }
+    
+    missing = [name for name, path in files.items() if not path.exists()]
+    if missing:
+        print(f"Cannot create comparison plot. Missing results for: {', '.join(missing)}")
+        return
+    
+    # Load all results
+    data = {}
+    for name, path in files.items():
+        data[name] = np.load(path)
+    
+    # Create comparison figure
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # Plot 1: Training returns comparison (MA50)
+    ax = axes[0]
+    for name in files.keys():
+        d = data[name]
+        train_returns = d["train_returns"]
+        ma = moving_average(train_returns, 50)
+        episodes = np.arange(50, 50 + len(ma))
+        ax.plot(episodes, ma, linewidth=2, label=name)
+    ax.set_xlabel("Episode", fontsize=12)
+    ax.set_ylabel("Reward (MA50)", fontsize=12)
+    ax.set_title("Training Returns Comparison", fontsize=14, fontweight="bold")
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+    
+    # Plot 2: Evaluation returns comparison
+    ax = axes[1]
+    for name in files.keys():
+        d = data[name]
+        eval_returns = d["eval_returns"]
+        eval_every = int(d["eval_every"])
+        eval_episodes = np.arange(eval_every, eval_every * len(eval_returns) + 1, eval_every)
+        ax.plot(eval_episodes, eval_returns, marker='o', linewidth=2, markersize=4, label=name)
+    ax.axhline(y=475, color='red', linestyle='--', linewidth=1, label='Solve threshold')
+    ax.set_xlabel("Episode", fontsize=12)
+    ax.set_ylabel("Evaluation Avg Return", fontsize=12)
+    ax.set_title("Greedy Evaluation Comparison", fontsize=14, fontweight="bold")
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plots_dir = Path("plots")
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    comparison_path = plots_dir / "algorithm_comparison.png"
+    plt.savefig(comparison_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Comparison plot saved to {comparison_path}")
 
 
 def main():
     cfg = A2CConfig(
         env_name="CartPole-v1",
         gamma=0.99,
-        lr_actor=2e-3,
-        lr_critic=3e-3,
-        lr_step_size=400,
-        lr_gamma=0.9,
-        min_lr=5e-4,
-        hidden=128,
+        
+        # Optimized config for faster convergence
+        lr_actor=1e-3,
+        lr_critic=5e-3,
+        lr_step_size=100,
+        lr_gamma=0.95,
+        min_lr=1e-4,
+        
+        hidden=256,
+        
         entropy_coef=0.05,
-        value_loss_coef=0.5,
+        value_loss_coef=0.25,
         max_grad_norm=1.0,
         normalize_advantages=True,
         max_episodes=2000,
-        seed=123,
+        seed=123,                  
         print_every=10,
         eval_every=50,
         eval_episodes=10,
@@ -424,6 +468,10 @@ def main():
     )
     returns, solved_ep, best_greedy = train_a2c(cfg)
     print(f"Done. episodes={len(returns)}, solved_ep={solved_ep}, best_greedy={best_greedy:.1f}")
+    
+    # Create comparison plot if all results exist
+    print("\nGenerating comparison plot...")
+    plot_comparison()
 
 
 if __name__ == "__main__":
