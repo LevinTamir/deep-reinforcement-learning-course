@@ -38,8 +38,8 @@ def set_seed(seed: int) -> None:
 
 def compute_returns(rewards: list[float], gamma: float) -> torch.Tensor:
     """
-    Monte-Carlo discounted returns.
-    Given rewards r_0..r_{T-1}, returns a tensor G_0..G_{T-1}.
+    monte-carlo discounted returns
+    given rewards r_0..r_{T-1}, returns a tensor G_0..G_{T-1}
     """
     G = 0.0
     returns = []
@@ -47,13 +47,14 @@ def compute_returns(rewards: list[float], gamma: float) -> torch.Tensor:
         G = r + gamma * G
         returns.append(G)
     returns.reverse()
+
     return torch.tensor(returns, dtype=torch.float32)
 
 
 class PolicyNet(nn.Module):
     """
-    Stochastic policy pi_theta(a|s) for *discrete* action spaces.
-    Outputs logits for a categorical distribution.
+    stochastic policy pi_theta(a|s) for *discrete* action spaces
+    outputs logits for a categorical distribution
     """
     def __init__(self, obs_dim: int, act_dim: int, hidden: int):
         super().__init__()
@@ -70,7 +71,7 @@ class PolicyNet(nn.Module):
 
 
 class ValueNet(nn.Module):
-    """State-value function approximator V_phi(s)."""
+    """V_phi(s) approximator"""
     def __init__(self, obs_dim: int, hidden: int):
         super().__init__()
         self.net = nn.Sequential(
@@ -82,14 +83,13 @@ class ValueNet(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x).squeeze(-1)  # [batch]
+        return self.net(x).squeeze(-1) 
 
 
 @torch.no_grad()
 def evaluate(policy: PolicyNet, env, episodes: int, device: str) -> float:
     """
-    Greedy-ish evaluation: take argmax over action probabilities.
-    (Alternatively sample for stochastic eval; choose what course expects.)
+    greedy-ish evaluation: take argmax over action probabilities
     """
     policy.eval()
     returns = []
@@ -111,8 +111,7 @@ def evaluate(policy: PolicyNet, env, episodes: int, device: str) -> float:
 
 def run_episode(policy: PolicyNet, env, device: str) -> dict[str, list]:
     """
-    Collect one full trajectory:
-    stores states, log_probs, rewards, and entropy terms.
+    collect one full trajectory stores states, log_probs, rewards, and entropy terms
     """
     obs, _ = env.reset()
     done = False
@@ -147,7 +146,7 @@ def run_episode(policy: PolicyNet, env, device: str) -> dict[str, list]:
 
 
 def moving_average(x: list[float], window: int) -> np.ndarray:
-    """Simple moving average using convolution; returns an array shorter by window-1."""
+    """simple moving average"""
     x = np.asarray(x, dtype=np.float32)
     if window <= 1 or len(x) < window:
         return x
@@ -163,15 +162,6 @@ def plot_learning_curves(
     ma_window: int ,
     title: str
 ) -> None:
-    """
-    Plots:
-      - Reward per episode
-      - Average reward over last 100 episodes
-      - (Optional) moving average of reward per episode
-      - Eval average reward every eval_every episodes
-    This matches the 'reward per episode' and 'average reward in the last 100 episodes'
-    style used in the reference report. [file:144][web:82]
-    """
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -325,7 +315,6 @@ def train(cfg: TrainConfig):
         title=f"REINFORCE ({tag}) - {cfg.env_name}",
     )
 
-    # Save results for comparison
     results_dir = Path("results")
     results_dir.mkdir(parents=True, exist_ok=True)
     np.savez(

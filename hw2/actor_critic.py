@@ -39,14 +39,13 @@ class A2CConfig:
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    """Orthogonal initialization for weights, constant for bias."""
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
 
 class Actor(nn.Module):
-    """Policy network π(a|s; θ)."""
+    """policy network π(a|s; θ)"""
     def __init__(self, obs_dim: int, act_dim: int, hidden: int):
         super().__init__()
         self.net = nn.Sequential(
@@ -61,7 +60,7 @@ class Actor(nn.Module):
 
 
 class Critic(nn.Module):
-    """Value function V(s; w)."""
+    """value function V(s; w)"""
     def __init__(self, obs_dim: int, hidden: int):
         super().__init__()
         self.net = nn.Sequential(
@@ -86,7 +85,7 @@ def step_env(env, api: str, action: int):
     return obs2, float(reward), bool(terminated), bool(truncated), info
 
 def moving_average(x: list[float], window: int) -> np.ndarray:
-    """Simple moving average using convolution; returns an array shorter by window-1."""
+    """simple moving average"""
     x = np.asarray(x, dtype=np.float32)
     if window <= 1 or len(x) < window:
         return x
@@ -102,13 +101,6 @@ def plot_learning_curves(
     ma_window: int = 50,
     title: str = "Actor-Critic learning curve",
 ) -> None:
-    """
-    Plots:
-      - Reward per episode
-      - Average reward over last 100 episodes
-      - (Optional) moving average of reward per episode
-      - Eval average reward every eval_every episodes
-    """
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -152,16 +144,16 @@ def compute_td_advantages(
     gamma: float
 ) -> torch.Tensor:
     """
-    Compute TD(0) advantages: δ_t = r_t + γ * V(s_{t+1}) * (1 - done) - V(s_t)
+    compute TD(0) advantages: δ_t = r_t + γ * V(s_{t+1}) * (1 - done) - V(s_t)
     
-    This is the key difference from REINFORCE with Baseline:
-    - REINFORCE uses Monte-Carlo returns: A_t = G_t - V(s_t)
-    - Actor-Critic uses TD-error: δ_t = r + γV(s') - V(s)
+    the difference from REINFORCE with Baseline:
+    - reinforce uses monte-carlo returns: A_t = G_t - V(s_t)
+    - actor-critic uses td-error: δ_t = r + γV(s') - V(s)
     """
+
     advantages = []
     for r, v, v_next, done in zip(rewards, values, next_values, dones):
-        # TD-error: δ = r + γV(s') - V(s)
-        # If done (terminated), V(s') = 0
+        # td-error: δ = r + γV(s') - V(s)
         bootstrap = 0.0 if done else v_next.item()
         td_target = r + gamma * bootstrap
         td_error = td_target - v.item()
@@ -171,7 +163,7 @@ def compute_td_advantages(
 
 @torch.no_grad()
 def evaluate_policy(cfg: A2CConfig, actor: Actor, episodes: int = 10) -> float:
-    """Evaluate policy using greedy (argmax) action selection."""
+    """evaluate policy using argmax action selection"""
     was_training = actor.training
     actor.eval()
     env = gym.make(cfg.env_name)
@@ -195,10 +187,6 @@ def evaluate_policy(cfg: A2CConfig, actor: Actor, episodes: int = 10) -> float:
         actor.train()
     return float(np.mean(returns))
 
-
-# -----------------------------
-# Training - TD-Based Actor-Critic
-# -----------------------------
 def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float]:
     set_seed(cfg.seed)
 
@@ -212,17 +200,17 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float]:
     actor = Actor(obs_dim, act_dim, cfg.hidden)
     critic = Critic(obs_dim, cfg.hidden)
 
-    # Adam optimizer
+    # adam optimizer
     opt_actor = torch.optim.Adam(actor.parameters(), lr=cfg.lr_actor)
     opt_critic = torch.optim.Adam(critic.parameters(), lr=cfg.lr_critic)
 
-    # Learning rate schedulers
+    # learning rate schedulers
     scheduler_actor = StepLR(opt_actor, step_size=cfg.lr_step_size, gamma=cfg.lr_gamma)
     scheduler_critic = StepLR(opt_critic, step_size=cfg.lr_step_size, gamma=cfg.lr_gamma)
 
     episode_returns = []
-    avg100_returns = []  # Track avg100 for plotting
-    eval_returns = []    # Track eval returns for plotting
+    avg100_returns = []
+    eval_returns = []  
     solved_ep = -1
     best_greedy = -1e9
     best_actor_state = None
@@ -231,8 +219,7 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float]:
     for ep in range(cfg.max_episodes):
         obs, _ = env.reset(seed=cfg.seed + ep)
         done = False
-
-        # Collect episode trajectory
+        
         states = []
         actions = []
         log_probs = []
@@ -240,11 +227,11 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float]:
         values = []
         next_values = []
         rewards = []
-        dones = []  # terminated flags (for bootstrapping)
+        dones = [] 
 
         while not done:
             obs_t = torch.as_tensor(obs, dtype=torch.float32)
-            # Actor: sample action
+            # actor: sample action
             logits = actor(obs_t)
             dist = torch.distributions.Categorical(logits=logits)
             action_t = dist.sample()
@@ -252,19 +239,19 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float]:
             log_prob = dist.log_prob(action_t)
             entropy = dist.entropy()
             
-            # Critic: estimate value
+            # critic: estimate value
             value = critic(obs_t)
             
-            # Environment step
+            # environment step
             obs2, reward, terminated, truncated, _ = step_env(env, api, action)
             done = terminated or truncated
             
-            # Next state value (for TD target)
+            # next state value
             with torch.no_grad():
                 obs2_t = torch.as_tensor(obs2, dtype=torch.float32)
                 next_value = critic(obs2_t)
             
-            # Store transition
+            # store transition
             states.append(obs_t)
             actions.append(action_t)
             log_probs.append(log_prob)
@@ -272,34 +259,26 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float]:
             values.append(value)
             next_values.append(next_value)
             rewards.append(reward)
-            dones.append(terminated)  # Use terminated, not truncated, for bootstrap decision
+            dones.append(terminated)
             
             obs = obs2
 
         ep_ret = sum(rewards)
         episode_returns.append(ep_ret)
 
-        # Stack tensors
-        log_probs_t = torch.stack(log_probs)    # [T]
-        entropies_t = torch.stack(entropies)    # [T]
-        values_t = torch.stack(values)          # [T]
-        
-        # Compute TD advantages: δ_t = r_t + γV(s_{t+1}) - V(s_t)
-        # This is the key Actor-Critic formulation (different from Monte-Carlo)
+        log_probs_t = torch.stack(log_probs) 
+        entropies_t = torch.stack(entropies) 
+        values_t = torch.stack(values)     
+
         advantages = compute_td_advantages(rewards, values, next_values, dones, cfg.gamma)
         
-        # Normalize advantages for stable training
         if cfg.normalize_advantages and len(advantages) > 1:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        # === Actor Loss ===
-        # L_actor = -E[log π(a|s) * δ] - entropy_coef * H(π)
+
         actor_loss = -(log_probs_t * advantages).mean()
         entropy_loss = -cfg.entropy_coef * entropies_t.mean()
 
-        # === Critic Loss ===
-        # L_critic = E[(r + γV(s') - V(s))^2] = E[δ^2]
-        # Recompute TD targets for gradient computation
         td_targets = []
         for r, v_next, terminal in zip(rewards, next_values, dones):
             bootstrap = 0.0 if terminal else v_next.item()
@@ -308,7 +287,6 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float]:
         
         critic_loss = cfg.value_loss_coef * ((td_targets_t - values_t) ** 2).mean()
 
-        # === Total Loss & Optimization ===
         total_loss = actor_loss + critic_loss + entropy_loss
 
         opt_actor.zero_grad()
@@ -322,29 +300,24 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float]:
         opt_actor.step()
         opt_critic.step()
 
-        # Step learning rate schedulers
         scheduler_actor.step()
         scheduler_critic.step()
 
-        # Clamp LR to minimum to prevent vanishing learning rate
         for param_group in opt_actor.param_groups:
             param_group['lr'] = max(param_group['lr'], cfg.min_lr)
         for param_group in opt_critic.param_groups:
             param_group['lr'] = max(param_group['lr'], cfg.min_lr)
 
         avg100 = float(np.mean(episode_returns[-100:])) if len(episode_returns) >= 100 else float("nan")
-        avg100_returns.append(avg100)  # Track for plotting
-        current_lr = opt_actor.param_groups[0]['lr']  # Get current LR for logging
+        avg100_returns.append(avg100) 
 
-        # Periodic evaluation
         if (ep + 1) % cfg.eval_every == 0:
             last_greedy = evaluate_policy(cfg, actor, episodes=cfg.eval_episodes)
-            eval_returns.append(last_greedy)  # Track for plotting
+            eval_returns.append(last_greedy) 
             if last_greedy > best_greedy:
                 best_greedy = last_greedy
                 best_actor_state = deepcopy(actor.state_dict())
             
-            # Print in REINFORCE style
             print(
                 f"Episode {ep+1:5d} | "
                 f"train_return={ep_ret:8.2f} | "
@@ -352,7 +325,6 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float]:
                 f"eval_avg={last_greedy:8.2f}"
             )
 
-        # Check solve condition
         if best_greedy >= cfg.solve_score:
             solved_ep = ep + 1
             print(f"SOLVED at episode {solved_ep} with best_greedy={best_greedy:.1f}")
@@ -366,7 +338,6 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float]:
     final_eval = evaluate_policy(cfg, actor, episodes=cfg.eval_episodes)
     print(f"Final greedy eval ({cfg.eval_episodes} eps): {final_eval:.1f}")
     
-    # Plot learning curves
     plot_learning_curves(
         train_returns=episode_returns,
         avg100_returns=avg100_returns,
@@ -377,7 +348,6 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float]:
         title=f"Actor-Critic (TD-based) - {cfg.env_name}",
     )
     
-    # Save results for comparison
     results_dir = Path("results")
     results_dir.mkdir(parents=True, exist_ok=True)
     np.savez(
@@ -389,16 +359,13 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float]:
         solved_ep=solved_ep if solved_ep != -1 else -1,
         best_greedy=best_greedy,
     )
-    print(f"Results saved to results/actor_critic.npz")
     
     return episode_returns, solved_ep, best_greedy
 
 
 def plot_comparison() -> None:
-    """Load results from all algorithms and create comparison plots."""
     results_dir = Path("results")
     
-    # Check if all result files exist
     files = {
         "REINFORCE (no baseline)": results_dir / "reinforce_without_baseline.npz",
         "REINFORCE (with baseline)": results_dir / "reinforce_with_baseline.npz",
@@ -410,15 +377,12 @@ def plot_comparison() -> None:
         print(f"Cannot create comparison plot. Missing results for: {', '.join(missing)}")
         return
     
-    # Load all results
     data = {}
     for name, path in files.items():
         data[name] = np.load(path)
     
-    # Create comparison figure
     fig, axes = plt.subplots(1, 2, figsize=(16, 6))
     
-    # Plot 1: Training returns comparison (MA50)
     ax = axes[0]
     for name in files.keys():
         d = data[name]
@@ -432,7 +396,6 @@ def plot_comparison() -> None:
     ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3)
     
-    # Plot 2: Evaluation returns comparison
     ax = axes[1]
     for name in files.keys():
         d = data[name]
@@ -462,7 +425,6 @@ def main():
         env_name="CartPole-v1",
         gamma=0.99,
         
-        # Optimized config for faster convergence
         lr_actor=1e-3,
         lr_critic=5e-3,
         lr_step_size=100,
@@ -486,8 +448,6 @@ def main():
     returns, solved_ep, best_greedy = train_a2c(cfg)
     print(f"Done. episodes={len(returns)}, solved_ep={solved_ep}, best_greedy={best_greedy:.1f}")
     
-    # Create comparison plot if all results exist
-    print("\nGenerating comparison plot...")
     plot_comparison()
 
 
