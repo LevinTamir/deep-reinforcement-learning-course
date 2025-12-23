@@ -1,3 +1,8 @@
+# ============================================
+# Section 1 – REINFORCE (CartPole-v1)
+# Mark Feldman (320827637) & Tamir Levin (315765347)
+# ============================================
+
 import numpy as np
 import torch
 import torch.nn as nn
