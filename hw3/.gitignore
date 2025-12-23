@@ -25,3 +25,6 @@ __pycache__/
 # MacOS / Windows system files (optional)
 .DS_Store
 Thumbs.db
+
+# ZIP files
+*.zip
