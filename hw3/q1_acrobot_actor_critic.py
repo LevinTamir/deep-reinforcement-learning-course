@@ -1,5 +1,5 @@
 # ============================================
-# Section 1 – Training Individual Networks (CartPole-v1)
+# Section 1 – Training Individual Networks (Acrobot-v1)
 # ============================================
 
 from dataclasses import dataclass
@@ -17,7 +17,7 @@ import gymnasium as gym
 
 @dataclass
 class A2CConfig:
-    env_name: str = "CartPole-v1"
+    env_name: str = "Acrobot-v1"
 
     gamma: float = 0.99
     lr_actor: float = 2e-3
@@ -40,7 +40,7 @@ class A2CConfig:
     print_every: int = 10
     eval_every: int = 25
     eval_episodes: int = 10
-    solve_score: float = 475.0
+    solve_score: float = -100.0  # Acrobot: solved when avg return >= -100
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -271,7 +271,6 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
             logits = actor(obs_t)
             dist = torch.distributions.Categorical(logits=logits)
             action_t = dist.sample()
-            # For CartPole, only use first 2 actions; for Acrobot use all 3
             action = int(action_t.item()) % act_dim
             log_prob = dist.log_prob(action_t)
             entropy = dist.entropy()
@@ -388,7 +387,7 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
         avg100_returns=avg100_returns,
         eval_returns=eval_returns,
         eval_every=cfg.eval_every,
-        out_path="plots/cartpole_actor_critic.png",
+        out_path="plots/acrobot_actor_critic.png",
         ma_window=50,
         title=f"Actor-Critic (TD-based) - {cfg.env_name}",
     )
@@ -396,7 +395,7 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
     results_dir = Path("results")
     results_dir.mkdir(parents=True, exist_ok=True)
     np.savez(
-        results_dir / "cartpole_actor_critic.npz",
+        results_dir / "acrobot_actor_critic.npz",
         train_returns=np.array(episode_returns),
         avg100_returns=np.array(avg100_returns),
         eval_returns=np.array(eval_returns),
@@ -412,7 +411,7 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
 
 def main():
     cfg = A2CConfig(
-        env_name="CartPole-v1",
+        env_name="Acrobot-v1",
         gamma=0.99,
         
         lr_actor=1e-3,
@@ -433,7 +432,7 @@ def main():
         print_every=10,
         eval_every=25,
         eval_episodes=10,
-        solve_score=475.0,
+        solve_score=-100.0,  # Acrobot: solved when avg return >= -100
     )
     print("\n=== Hyperparameters ===")
     print(f"gamma: {cfg.gamma}")

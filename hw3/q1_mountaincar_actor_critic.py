@@ -1,5 +1,5 @@
 # ============================================
-# Section 1 – Training Individual Networks (CartPole-v1)
+# Section 1 – Training Individual Networks (MountainCarContinuous-v0)
 # ============================================
 
 from dataclasses import dataclass
@@ -17,11 +17,11 @@ import gymnasium as gym
 
 @dataclass
 class A2CConfig:
-    env_name: str = "CartPole-v1"
+    env_name: str = "MountainCar-v0"
 
     gamma: float = 0.99
     lr_actor: float = 2e-3
-    lr_critic: float = 1e-3
+    lr_critic: float = 1e-2
     hidden: int = 256
 
     #learning rate decay
@@ -38,9 +38,9 @@ class A2CConfig:
     seed: int = 543
 
     print_every: int = 10
-    eval_every: int = 25
+    eval_every: int = 50  # Increased for MountainCar
     eval_episodes: int = 10
-    solve_score: float = 475.0
+    solve_score: float = 90.0  # MountainCarContinuous standard: 90.0
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -58,24 +58,27 @@ def pad_observation(obs: np.ndarray, target_size: int = 6) -> np.ndarray:
 
 
 class Actor(nn.Module):
-    """policy network π(a|s; θ) - ReLU/ELU architecture matching reference"""
-    def __init__(self, obs_dim: int = 6, act_dim: int = 3, hidden: int = 128):
+    """policy network π(a|s; θ) - 6 input, 3 continuous outputs for meta-learning"""
+    def __init__(self, obs_dim: int = 6, act_dim: int = 3, hidden: int = 256):
         super().__init__()
         self.obs_dim = 6
         self.act_dim = 3
         self.fc1 = layer_init(nn.Linear(self.obs_dim, hidden))
         self.fc2 = layer_init(nn.Linear(hidden, hidden))
-        self.fc3 = layer_init(nn.Linear(hidden, self.act_dim), std=0.01)
+        self.mean_head = layer_init(nn.Linear(hidden, self.act_dim), std=0.01)
+        self.log_std = nn.Parameter(torch.zeros(self.act_dim))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         x = torch.relu(self.fc1(x))
         x = torch.nn.functional.elu(self.fc2(x))
-        return self.fc3(x)
+        mean = torch.tanh(self.mean_head(x))  # Clamp to [-1, 1]
+        std = torch.exp(self.log_std)
+        return mean, std
 
 
 class Critic(nn.Module):
     """value function V(s; w) - ReLU/ELU architecture matching reference"""
-    def __init__(self, obs_dim: int = 6, hidden: int = 128):
+    def __init__(self, obs_dim: int = 6, hidden: int = 256):
         super().__init__()
         self.obs_dim = 6
         self.fc1 = layer_init(nn.Linear(self.obs_dim, hidden))
@@ -94,7 +97,10 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
 
 
-def step_env(env, api: str, action: int):
+def step_env(env, api: str, action):
+    # Only wrap continuous (float) actions in array; discrete (int) actions pass through
+    if isinstance(action, float):
+        action = [action]
     obs2, reward, terminated, truncated, info = env.step(action)
     return obs2, float(reward), bool(terminated), bool(truncated), info
 
@@ -177,7 +183,7 @@ def compute_td_advantages(
 
 @torch.no_grad()
 def evaluate_policy(cfg: A2CConfig, actor: Actor, episodes: int = 10) -> float:
-    """evaluate policy using argmax action selection"""
+    """evaluate policy using mean action selection"""
     was_training = actor.training
     actor.eval()
     env = gym.make(cfg.env_name)
@@ -190,8 +196,8 @@ def evaluate_policy(cfg: A2CConfig, actor: Actor, episodes: int = 10) -> float:
         ep_ret = 0.0
         while not done:
             obs_t = torch.as_tensor(pad_observation(obs), dtype=torch.float32)
-            logits = actor(obs_t)
-            action = int(torch.argmax(logits).item()) % env.action_space.n
+            mean, std = actor(obs_t)
+            action = torch.clamp(mean, -1.0, 1.0).tolist()  # Use mean (greedy)
             obs, r, terminated, truncated, _ = step_env(env, api, action)
             done = terminated or truncated
             ep_ret += r
@@ -219,17 +225,15 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
     obs, _ = env.reset(seed=cfg.seed)
 
     obs_dim = int(np.asarray(obs).shape[0])
-    act_dim = int(env.action_space.n)
     
-    # Use fixed 6 input, 3 output for meta-learning compatibility
+    # Use fixed 6 input, 3 continuous outputs for meta-learning
     fixed_obs_dim = 6
     fixed_act_dim = 3
     
     print(f"Environment: {cfg.env_name}")
     print(f"Original observation size: {obs_dim}")
     print(f"Padded observation size (input): {fixed_obs_dim}")
-    print(f"Original action size: {act_dim}")
-    print(f"Network output size: {fixed_act_dim}")
+    print(f"Network output size (continuous): {fixed_act_dim}")
     print(f"Hidden layer size: {cfg.hidden}")
 
     actor = Actor(fixed_obs_dim, fixed_act_dim, cfg.hidden)
@@ -267,14 +271,13 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
 
         while not done:
             obs_t = torch.as_tensor(pad_observation(obs), dtype=torch.float32)
-            # actor: sample action
-            logits = actor(obs_t)
-            dist = torch.distributions.Categorical(logits=logits)
+            # actor: sample action from continuous distribution (3D)
+            mean, std = actor(obs_t)
+            dist = torch.distributions.Normal(mean, std)
             action_t = dist.sample()
-            # For CartPole, only use first 2 actions; for Acrobot use all 3
-            action = int(action_t.item()) % act_dim
-            log_prob = dist.log_prob(action_t)
-            entropy = dist.entropy()
+            action = torch.clamp(action_t, -1.0, 1.0).tolist()  # 3D continuous action
+            log_prob = dist.log_prob(action_t).sum()
+            entropy = dist.entropy().sum()
             
             # critic: estimate value
             value = critic(obs_t)
@@ -388,7 +391,7 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
         avg100_returns=avg100_returns,
         eval_returns=eval_returns,
         eval_every=cfg.eval_every,
-        out_path="plots/cartpole_actor_critic.png",
+        out_path="plots/mountaincar_actor_critic.png",
         ma_window=50,
         title=f"Actor-Critic (TD-based) - {cfg.env_name}",
     )
@@ -396,7 +399,7 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
     results_dir = Path("results")
     results_dir.mkdir(parents=True, exist_ok=True)
     np.savez(
-        results_dir / "cartpole_actor_critic.npz",
+        results_dir / "mountaincar_actor_critic.npz",
         train_returns=np.array(episode_returns),
         avg100_returns=np.array(avg100_returns),
         eval_returns=np.array(eval_returns),
@@ -412,28 +415,24 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
 
 def main():
     cfg = A2CConfig(
-        env_name="CartPole-v1",
+        env_name="MountainCarContinuous-v0",
         gamma=0.99,
-        
-        lr_actor=1e-3,
-        lr_critic=5e-3,
-        lr_step_size=100,
-        lr_gamma=0.95,
+        lr_actor=5e-3,
+        lr_critic=2e-2,
+        lr_step_size=40,
+        lr_gamma=0.7,
         min_lr=1e-4,
-        
         hidden=256,
-        
         entropy_coef=0.05,
-        value_loss_coef=0.25,
-        max_grad_norm=1.0,
+        value_loss_coef=0.5,
+        max_grad_norm=0.5,
         normalize_advantages=True,
-        
         max_episodes=2000,
-        seed=123,                  
+        seed=543,
         print_every=10,
-        eval_every=25,
+        eval_every=50,
         eval_episodes=10,
-        solve_score=475.0,
+        solve_score=90.0,
     )
     print("\n=== Hyperparameters ===")
     print(f"gamma: {cfg.gamma}")
