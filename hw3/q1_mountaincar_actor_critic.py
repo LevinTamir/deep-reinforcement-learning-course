@@ -1,12 +1,5 @@
 # ============================================================
 #  Section 1 – Training Individual Networks (MountainCarContinuous-v0)
-#  Actor-Critic (TD(0)) with HW-compatible fixed input/output sizes
-#
-#  Key fixes vs your current file:
-#   1) Keep TRUE env reward separate from shaped reward (no "fake" 500 returns)
-#   2) Greedy evaluation uses tanh(mu) (avoids constant +/-1 action, eval ~ -25)
-#   3) Shaping (optional) is used ONLY for learning targets/advantages
-#   4) Solve criterion is based on greedy evaluation on TRUE env reward
 # ============================================================
 
 from dataclasses import dataclass
@@ -15,11 +8,12 @@ from pathlib import Path
 import time
 import random
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.optim.lr_scheduler import StepLR
 import gymnasium as gym
-import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 
 
@@ -30,19 +24,25 @@ from sklearn.preprocessing import StandardScaler
 class A2CConfig:
     env_name: str = "MountainCarContinuous-v0"
 
-    # RL
     gamma: float = 0.99
     lr_actor: float = 1e-4
     lr_critic: float = 5e-4
     hidden: int = 256
+
+    # Learning rate decay
+    lr_step_size: int = 100
+    lr_gamma: float = 0.95
+    min_lr: float = 1e-5
+
     entropy_coef: float = 0.01
     value_loss_coef: float = 0.5
-    normalize_advantages: bool = False
     max_grad_norm: float = 0.5
+    normalize_advantages: bool = False
 
-    # Training
     max_episodes: int = 300
     seed: int = 123
+
+    print_every: int = 10
     eval_every: int = 10
     eval_episodes: int = 10
     solve_score: float = 90.0  # greedy-eval threshold (TRUE env return)
@@ -61,9 +61,6 @@ class A2CConfig:
     # Reward shaping toggle (learning only)
     use_reward_shaping: bool = True
 
-    # Plotting
-    plot_path: str = "plots/mountaincarcontinuous_actor_critic.png"
-
 
 # -----------------------------
 # Utilities
@@ -72,6 +69,12 @@ def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+
+def step_env(env, action: np.ndarray):
+    """Step environment and return standardized output."""
+    obs2, reward, terminated, truncated, info = env.step(action)
+    return obs2, float(reward), bool(terminated), bool(truncated), info
 
 
 def pad_observation(obs: np.ndarray, target_size: int) -> np.ndarray:
@@ -88,6 +91,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 def moving_average(x: list[float], window: int) -> np.ndarray:
+    """Simple moving average."""
     x = np.asarray(x, dtype=np.float32)
     if window <= 1 or len(x) < window:
         return x
@@ -95,35 +99,48 @@ def moving_average(x: list[float], window: int) -> np.ndarray:
     return np.convolve(x, kernel, mode="valid")
 
 
-def plot_learning_curves(train_returns_env, eval_returns, eval_every, out_path):
+def plot_learning_curves(
+    train_returns: list[float],
+    avg100_returns: list[float],
+    eval_returns: list[float],
+    eval_every: int,
+    out_path: str = "plots/mountaincarcontinuous_actor_critic.png",
+    ma_window: int = 50,
+    title: str = "Actor-Critic learning curve",
+) -> None:
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    episodes = np.arange(1, len(train_returns_env) + 1)
-    eval_x = np.arange(eval_every, eval_every * len(eval_returns) + 1, eval_every)
+    episodes = np.arange(1, len(train_returns) + 1)
+    eval_episodes = np.arange(eval_every, eval_every * len(eval_returns) + 1, eval_every)
 
     plt.figure(figsize=(12, 6))
+
     plt.subplot(2, 1, 1)
-    plt.plot(episodes, train_returns_env, alpha=0.35, label="Train return (env)")
-    ma = moving_average(train_returns_env, 20)
+    plt.plot(episodes, train_returns, alpha=0.4, label="Reward per episode")
+    ma = moving_average(train_returns, ma_window)
     if len(ma) > 1:
-        ma_x = np.arange(20, 20 + len(ma))
-        plt.plot(ma_x, ma, linewidth=2, label="Train return (env, MA20)")
+        ma_x = np.arange(ma_window, ma_window + len(ma))
+        plt.plot(ma_x, ma, linewidth=2, label=f"Reward (MA{ma_window})")
+    plt.xlabel("Episode")
+    plt.ylabel("Reward")
+    plt.title(title)
     plt.grid(True, alpha=0.3)
     plt.legend()
-    plt.ylabel("Return")
 
     plt.subplot(2, 1, 2)
+    plt.plot(episodes, avg100_returns, linewidth=2, label="Avg reward (last 100 episodes)")
     if len(eval_returns) > 0:
-        plt.plot(eval_x, eval_returns, marker="o", linewidth=1.5, label="Greedy eval avg (env)")
+        plt.plot(eval_episodes, eval_returns, marker="o", linewidth=1.5, label="Eval avg return")
+    plt.xlabel("Episode")
+    plt.ylabel("Reward")
     plt.grid(True, alpha=0.3)
     plt.legend()
-    plt.xlabel("Episode")
-    plt.ylabel("Return")
+
     plt.tight_layout()
     plt.savefig(out, dpi=150)
     plt.close()
-    print(f"Saved plot to {out_path}")
+    print(f"Saved learning curves to {out_path}")
 
 
 # -----------------------------
@@ -232,9 +249,29 @@ def evaluate_policy_greedy(cfg: A2CConfig, actor: Actor, scaler: StandardScaler,
     return float(np.mean(returns))
 
 
-# -----------------------------
-# Reward shaping (optional, learning only)
-# -----------------------------
+def compute_td_advantages(
+    rewards: list[float],
+    values: list[torch.Tensor],
+    next_values: list[torch.Tensor],
+    dones: list[bool],
+    gamma: float,
+) -> torch.Tensor:
+    """
+    Compute TD(0) advantages: δ_t = r_t + γ * V(s_{t+1}) * (1 - done) - V(s_t)
+    
+    The difference from REINFORCE with Baseline:
+    - REINFORCE uses Monte-Carlo returns: A_t = G_t - V(s_t)
+    - Actor-Critic uses TD-error: δ_t = r + γV(s') - V(s)
+    """
+    advantages = []
+    for r, v, v_next, done in zip(rewards, values, next_values, dones):
+        bootstrap = 0.0 if done else v_next.item()
+        td_target = r + gamma * bootstrap
+        td_error = td_target - v.item()
+        advantages.append(td_error)
+    return torch.tensor(advantages, dtype=torch.float32)
+
+
 def shaped_reward_energy(obs: np.ndarray, obs2: np.ndarray, r_env: float) -> float:
     """
     Energy-based shaping used ONLY for learning (targets/advantages), not for reporting.
@@ -255,10 +292,17 @@ def shaped_reward_energy(obs: np.ndarray, obs2: np.ndarray, r_env: float) -> flo
     return float(r_env) + float(energy_bonus)
 
 
-# -----------------------------
-# Training
-# -----------------------------
-def train(cfg: A2CConfig):
+def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
+    """Train actor-critic agent and return results with timing statistics.
+    
+    Returns:
+        episode_returns: list of returns per episode
+        solved_ep: episode at which solve threshold was reached (-1 if not solved)
+        best_greedy: best greedy evaluation return
+        elapsed_time: total training time in seconds
+        num_iterations: total number of training iterations
+    """
+    start_time = time.time()
     set_seed(cfg.seed)
 
     env = gym.make(cfg.env_name)
@@ -279,42 +323,49 @@ def train(cfg: A2CConfig):
     scaler.fit(np.array(scaler_obs, dtype=np.float32))
     print(f"Scaler fitted on {len(scaler_obs)} observations")
 
-    actor = Actor(cfg.fixed_obs_dim, cfg.fixed_actor_out_dim, cfg.hidden)
-    critic = Critic(cfg.fixed_obs_dim, cfg.hidden)
-
-    opt_actor = torch.optim.Adam(actor.parameters(), lr=cfg.lr_actor)
-    opt_critic = torch.optim.Adam(critic.parameters(), lr=cfg.lr_critic)
-
+    obs_dim = int(np.asarray(obs0).shape[0])
+    
     print(f"Environment: {cfg.env_name}")
-    print(f"Original observation size: {np.asarray(obs0).shape[0]}")
+    print(f"Original observation size: {obs_dim}")
     print(f"Padded observation size (input): {cfg.fixed_obs_dim}")
     print(f"Network output size (fixed): {cfg.fixed_actor_out_dim}")
     print("Action bounds: [-1.0, 1.0]")
     print(f"Hidden layer size: {cfg.hidden}")
 
-    train_returns_env = []
-    eval_returns = []
+    actor = Actor(cfg.fixed_obs_dim, cfg.fixed_actor_out_dim, cfg.hidden)
+    critic = Critic(cfg.fixed_obs_dim, cfg.hidden)
 
+    # Adam optimizer
+    opt_actor = torch.optim.Adam(actor.parameters(), lr=cfg.lr_actor)
+    opt_critic = torch.optim.Adam(critic.parameters(), lr=cfg.lr_critic)
+
+    # Learning rate schedulers
+    scheduler_actor = StepLR(opt_actor, step_size=cfg.lr_step_size, gamma=cfg.lr_gamma)
+    scheduler_critic = StepLR(opt_critic, step_size=cfg.lr_step_size, gamma=cfg.lr_gamma)
+
+    episode_returns = []
+    avg100_returns = []
+    eval_returns = []
+    solved_ep = -1
     best_greedy = -1e9
     best_actor_state = None
-    solved_ep = -1
-
-    start_time = time.time()
+    last_greedy = float("nan")
+    total_iterations = 0
 
     for ep in range(cfg.max_episodes):
         obs, _ = env.reset(seed=cfg.seed + ep)
         done = False
 
-        ep_ret_env = 0.0      # TRUE env return (for reporting)
-        ep_ret_shaped = 0.0   # shaped return (for debugging)
-
+        states = []
+        actions = []
         log_probs = []
         entropies = []
         values = []
-        targets = []
-        advantages = []
+        next_values = []
+        rewards = []      # Learning rewards (shaped if enabled)
+        rewards_env = []  # TRUE env rewards (for reporting)
+        dones = []
         I_weights = []
-
         I = 1.0
 
         while not done:
@@ -323,69 +374,80 @@ def train(cfg: A2CConfig):
             obs_pad = pad_observation(obs_norm, cfg.fixed_obs_dim)
             obs_t = torch.as_tensor(obs_pad, dtype=torch.float32)
 
+            # Actor: sample action
             out = actor(obs_t)
             action_t, log_prob, entropy = sample_action_and_logprob(cfg, out)
+            
+            # Critic: estimate value
             value = critic(obs_t)
 
-            # Step env (detach!)
+            # Environment step
             action_np = action_t.detach().cpu().numpy().astype(np.float32)
-            obs2, r_env, terminated, truncated, _ = env.step(action_np)
-            done = bool(terminated or truncated)
-
-            # Track TRUE env return
-            r_env_f = float(r_env)
-            ep_ret_env += r_env_f
+            obs2, r_env, terminated, truncated, _ = step_env(env, action_np)
+            done = terminated or truncated
 
             # Learning reward (optionally shaped)
             if cfg.use_reward_shaping:
-                r_learn = shaped_reward_energy(obs, obs2, r_env_f)
+                r_learn = shaped_reward_energy(obs, obs2, r_env)
             else:
-                r_learn = r_env_f
+                r_learn = r_env
 
-            ep_ret_shaped += float(r_learn)
-
-            # Critic bootstrap
+            # Next state value
             with torch.no_grad():
                 obs2_norm = scaler.transform(np.asarray(obs2, dtype=np.float32).reshape(1, -1)).flatten()
                 obs2_pad = pad_observation(obs2_norm, cfg.fixed_obs_dim)
                 obs2_t = torch.as_tensor(obs2_pad, dtype=torch.float32)
                 next_value = critic(obs2_t)
-                bootstrap = 0.0 if done else next_value.item()
-                td_target = float(r_learn) + cfg.gamma * bootstrap
-                td_error = td_target - value.item()
 
-            # Store
+            # Store transition
+            states.append(obs_t)
+            actions.append(action_t)
             log_probs.append(log_prob)
             entropies.append(entropy)
             values.append(value)
-            targets.append(td_target)
-            advantages.append(td_error)
+            next_values.append(next_value)
+            rewards.append(r_learn)
+            rewards_env.append(r_env)
+            dones.append(terminated)
             I_weights.append(I)
 
             obs = obs2
             I *= cfg.gamma
 
+        ep_ret = sum(rewards_env)  # TRUE env return
+        episode_returns.append(ep_ret)
+        total_iterations += len(rewards)
+
         # Convert to tensors
         log_probs_t = torch.stack(log_probs)
         entropies_t = torch.stack(entropies)
         values_t = torch.stack(values)
-        targets_t = torch.tensor(targets, dtype=torch.float32)
-        adv_t = torch.tensor(advantages, dtype=torch.float32)
 
-        if cfg.normalize_advantages and len(adv_t) > 1:
-            adv_t = (adv_t - adv_t.mean()) / (adv_t.std() + 1e-8)
+        # Compute advantages using learning rewards
+        advantages = compute_td_advantages(rewards, values, next_values, dones, cfg.gamma)
+
+        if cfg.normalize_advantages and len(advantages) > 1:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         if cfg.use_I_weight:
             I_t = torch.tensor(I_weights, dtype=torch.float32)
         else:
-            I_t = torch.ones_like(adv_t)
+            I_t = torch.ones_like(advantages)
 
-        # Losses
-        actor_loss = -(log_probs_t * adv_t * I_t).mean()
-        entropy_bonus = cfg.entropy_coef * entropies_t.mean()
-        critic_loss = cfg.value_loss_coef * ((targets_t - values_t) ** 2).mean()
+        # Actor loss
+        actor_loss = -(log_probs_t * advantages * I_t).mean()
+        entropy_loss = -cfg.entropy_coef * entropies_t.mean()
 
-        total_loss = actor_loss + critic_loss - entropy_bonus
+        # Critic loss (TD targets using learning rewards)
+        td_targets = []
+        for r, v_next, terminal in zip(rewards, next_values, dones):
+            bootstrap = 0.0 if terminal else v_next.item()
+            td_targets.append(r + cfg.gamma * bootstrap)
+        td_targets_t = torch.tensor(td_targets, dtype=torch.float32)
+
+        critic_loss = cfg.value_loss_coef * ((td_targets_t - values_t) ** 2).mean()
+
+        total_loss = actor_loss + critic_loss + entropy_loss
 
         opt_actor.zero_grad()
         opt_critic.zero_grad()
@@ -398,87 +460,113 @@ def train(cfg: A2CConfig):
         opt_actor.step()
         opt_critic.step()
 
-        # Report TRUE env return
-        train_returns_env.append(ep_ret_env)
+        scheduler_actor.step()
+        scheduler_critic.step()
+
+        for param_group in opt_actor.param_groups:
+            param_group['lr'] = max(param_group['lr'], cfg.min_lr)
+        for param_group in opt_critic.param_groups:
+            param_group['lr'] = max(param_group['lr'], cfg.min_lr)
+
+        avg100 = float(np.mean(episode_returns[-100:])) if len(episode_returns) >= 100 else float("nan")
+        avg100_returns.append(avg100)
 
         # Greedy evaluation on TRUE env return
         if (ep + 1) % cfg.eval_every == 0:
-            greedy = evaluate_policy_greedy(cfg, actor, scaler, cfg.eval_episodes)
-            eval_returns.append(greedy)
+            last_greedy = evaluate_policy_greedy(cfg, actor, scaler, cfg.eval_episodes)
+            eval_returns.append(last_greedy)
 
-            if greedy > best_greedy:
-                best_greedy = greedy
+            if last_greedy > best_greedy:
+                best_greedy = last_greedy
                 best_actor_state = deepcopy(actor.state_dict())
 
-            avg100 = float(np.mean(train_returns_env[-100:])) if len(train_returns_env) >= 100 else float("nan")
-
             print(
-                f"Episode {ep+1:4d}/{cfg.max_episodes} | "
-                f"train_env_return={ep_ret_env:8.2f} | "
-                f"train_learn_return={ep_ret_shaped:8.2f} | "
-                f"avg100_env={avg100:8.2f} | "
-                f"eval_avg_env={greedy:8.2f}"
+                f"Episode {ep+1:5d} | "
+                f"train_return={ep_ret:8.2f} | "
+                f"avg100={avg100:8.2f} | "
+                f"eval_avg={last_greedy:8.2f}"
             )
 
-            if best_greedy >= cfg.solve_score:
-                solved_ep = ep + 1
-                print(f"SOLVED at episode {solved_ep} with best_greedy={best_greedy:.1f}")
-                break
+        if best_greedy >= cfg.solve_score:
+            solved_ep = ep + 1
+            print(f"SOLVED at episode {solved_ep} with best_greedy={best_greedy:.1f}")
+            break
 
     env.close()
+    elapsed_time = time.time() - start_time
 
     # Restore best actor
     if best_actor_state is not None:
         actor.load_state_dict(best_actor_state)
 
     final_eval = evaluate_policy_greedy(cfg, actor, scaler, cfg.eval_episodes)
-    elapsed = time.time() - start_time
+    print(f"Final greedy eval ({cfg.eval_episodes} eps): {final_eval:.1f}")
+    print(f"\n--- Training Statistics ---")
+    print(f"Total episodes: {ep + 1}")
+    print(f"Total training iterations: {total_iterations}")
+    print(f"Elapsed time: {elapsed_time:.2f} seconds")
+    print(f"Solved at episode: {solved_ep if solved_ep != -1 else 'Not solved'}")
+    print(f"Best greedy return: {best_greedy:.2f}")
 
-    print(f"Final greedy eval (env, {cfg.eval_episodes} eps): {final_eval:.2f}")
-    print(f"Best greedy eval (env): {best_greedy:.2f}")
-    print(f"Solved episode: {solved_ep if solved_ep != -1 else 'Not solved'}")
-    print(f"Elapsed time: {elapsed:.2f}s")
-
-    # Save plot + results (TRUE env returns)
-    plot_learning_curves(train_returns_env, eval_returns, cfg.eval_every, cfg.plot_path)
-
-    Path("results").mkdir(parents=True, exist_ok=True)
-    np.savez(
-        "results/mountaincarcontinuous_actor_critic.npz",
-        train_env_returns=np.array(train_returns_env, dtype=np.float32),
-        eval_env_returns=np.array(eval_returns, dtype=np.float32),
+    plot_learning_curves(
+        train_returns=episode_returns,
+        avg100_returns=avg100_returns,
+        eval_returns=eval_returns,
         eval_every=cfg.eval_every,
-        solved_ep=solved_ep,
+        out_path="plots/mountaincarcontinuous_actor_critic.png",
+        ma_window=50,
+        title=f"Actor-Critic (TD-based) - {cfg.env_name}",
+    )
+
+    results_dir = Path("results")
+    results_dir.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        results_dir / "mountaincarcontinuous_actor_critic.npz",
+        train_returns=np.array(episode_returns),
+        avg100_returns=np.array(avg100_returns),
+        eval_returns=np.array(eval_returns),
+        eval_every=cfg.eval_every,
+        solved_ep=solved_ep if solved_ep != -1 else -1,
         best_greedy=best_greedy,
-        final_eval=final_eval,
-        elapsed=elapsed,
+        elapsed_time=elapsed_time,
+        total_iterations=total_iterations,
         used_reward_shaping=cfg.use_reward_shaping,
     )
+
+    return episode_returns, solved_ep, best_greedy, elapsed_time, total_iterations
 
 
 def main():
     cfg = A2CConfig(
         env_name="MountainCarContinuous-v0",
-        gamma=0.99,
+        gamma=0.985,
+
         lr_actor=1e-4,
         lr_critic=5e-4,
+        lr_step_size=100,
+        lr_gamma=0.95,
+        min_lr=1e-5,
+
         hidden=256,
+
         entropy_coef=0.01,
         value_loss_coef=0.5,
-        normalize_advantages=False,
         max_grad_norm=0.5,
-        max_episodes=300,
+        normalize_advantages=False,
+
+        max_episodes=2000,
         seed=123,
+        print_every=10,
         eval_every=10,
         eval_episodes=10,
         solve_score=90.0,
+
         fixed_obs_dim=6,
         fixed_actor_out_dim=3,
         log_std_min=-3.0,
         log_std_max=1.0,
         use_I_weight=True,
         use_reward_shaping=True,  # set False if you must not shape rewards for HW
-        plot_path="plots/mountaincarcontinuous_actor_critic.png",
     )
 
     print("\n=== Hyperparameters ===")
@@ -490,9 +578,10 @@ def main():
     print(f"max_grad_norm: {cfg.max_grad_norm}")
     print(f"max_episodes: {cfg.max_episodes}")
     print(f"solve_score: {cfg.solve_score}")
-    print("=======================\n")
-
-    train(cfg)
+    print("=======================")
+    returns, solved_ep, best_greedy, elapsed_time, total_iterations = train_a2c(cfg)
+    print(f"Done. episodes={len(returns)}, solved_ep={solved_ep}, best_greedy={best_greedy:.1f}")
+    print(f"Elapsed time: {elapsed_time:.2f}s, Total iterations: {total_iterations}")
 
 
 if __name__ == "__main__":
