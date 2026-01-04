@@ -1,87 +1,152 @@
-# ============================================
-# Section 1 – Training Individual Networks (MountainCarContinuous-v0)
-# ============================================
+# ============================================================
+#  Section 1 – Training Individual Networks (MountainCar-v0)
+# ============================================================
 
 from dataclasses import dataclass
 from copy import deepcopy
 from pathlib import Path
 import time
-
-import matplotlib.pyplot as plt
-import numpy as np
 import random
+
+import numpy as np
 import torch
 import torch.nn as nn
-from torch.optim.lr_scheduler import StepLR
 import gymnasium as gym
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
 
+
+# -----------------------------
+# Config
+# -----------------------------
 @dataclass
 class A2CConfig:
-    env_name: str = "MountainCar-v0"
+    env_name: str = "MountainCarContinuous-v0"
 
+    # RL
     gamma: float = 0.99
-    lr_actor: float = 2e-3
-    lr_critic: float = 1e-2
+    lr_actor: float = 3e-4
+    lr_critic: float = 1e-3
     hidden: int = 256
-
-    #learning rate decay
-    lr_step_size: int = 40
-    lr_gamma: float = 0.7
-    min_lr: float = 1e-4
-
-    entropy_coef: float = 0.01
+    entropy_coef: float = 0.02
     value_loss_coef: float = 0.5
-    max_grad_norm: float = 0.5
     normalize_advantages: bool = True
+    max_grad_norm: float = 1.0
 
-    max_episodes: int = 2000
-    seed: int = 543
-
-    print_every: int = 10
-    eval_every: int = 50  # Increased for MountainCar
+    # Training
+    max_episodes: int = 300
+    seed: int = 123
+    eval_every: int = 10
     eval_episodes: int = 10
-    solve_score: float = 90.0  # MountainCarContinuous standard: 90.0
+    solve_score: float = 90.0        # greedy-eval threshold
+
+    # Fixed IO sizes (HW requirement)
+    fixed_obs_dim: int = 6
+    fixed_actor_out_dim: int = 3
+
+    # Gaussian policy stabilization
+    log_std_min: float = -3.0
+    log_std_max: float = 1.0
+
+    # Optional: per-step discount accumulator I_t (as in TF ref)
+    use_I_weight: bool = True
+
+    # Plotting
+    plot_path: str = "plots/mountaincarcontinuous_actor_critic.png"
 
 
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
+# -----------------------------
+# Utilities
+# -----------------------------
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
 
-def pad_observation(obs: np.ndarray, target_size: int = 6) -> np.ndarray:
-    """Pad observation to target size with zeros for meta-learning compatibility."""
+def pad_observation(obs: np.ndarray, target_size: int) -> np.ndarray:
     obs = np.asarray(obs, dtype=np.float32)
-    if len(obs) < target_size:
-        obs = np.pad(obs, (0, target_size - len(obs)), mode='constant', constant_values=0.0)
+    if obs.shape[0] < target_size:
+        obs = np.pad(obs, (0, target_size - obs.shape[0]), mode="constant", constant_values=0.0)
     return obs[:target_size]
 
 
-class Actor(nn.Module):
-    """policy network π(a|s; θ) - 6 input, 3 continuous outputs for meta-learning"""
-    def __init__(self, obs_dim: int = 6, act_dim: int = 3, hidden: int = 256):
-        super().__init__()
-        self.obs_dim = 6
-        self.act_dim = 3
-        self.fc1 = layer_init(nn.Linear(self.obs_dim, hidden))
-        self.fc2 = layer_init(nn.Linear(hidden, hidden))
-        self.mean_head = layer_init(nn.Linear(hidden, self.act_dim), std=0.01)
-        self.log_std = nn.Parameter(torch.zeros(self.act_dim))
+def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    nn.init.orthogonal_(layer.weight, std)
+    nn.init.constant_(layer.bias, bias_const)
+    return layer
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+
+def moving_average(x: list[float], window: int) -> np.ndarray:
+    x = np.asarray(x, dtype=np.float32)
+    if window <= 1 or len(x) < window:
+        return x
+    kernel = np.ones(window, dtype=np.float32) / window
+    return np.convolve(x, kernel, mode="valid")
+
+
+def plot_learning_curves(train_returns, eval_returns, eval_every, out_path):
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    episodes = np.arange(1, len(train_returns) + 1)
+    eval_x = np.arange(eval_every, eval_every * len(eval_returns) + 1, eval_every)
+
+    plt.figure(figsize=(12, 6))
+    plt.subplot(2, 1, 1)
+    plt.plot(episodes, train_returns, alpha=0.35, label="Train return")
+    ma = moving_average(train_returns, 20)
+    if len(ma) > 1:
+        ma_x = np.arange(20, 20 + len(ma))
+        plt.plot(ma_x, ma, linewidth=2, label="Train return (MA20)")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.ylabel("Return")
+
+    plt.subplot(2, 1, 2)
+    if len(eval_returns) > 0:
+        plt.plot(eval_x, eval_returns, marker="o", linewidth=1.5, label="Greedy eval avg")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.xlabel("Episode")
+    plt.ylabel("Return")
+    plt.tight_layout()
+    plt.savefig(out, dpi=150)
+    plt.close()
+    print(f"Saved plot to {out_path}")
+
+
+# -----------------------------
+# Networks
+# -----------------------------
+class Actor(nn.Module):
+    """
+    Fixed output size = 3:
+      out[0] -> mu (mean)
+      out[1] -> log_std
+      out[2] -> dummy (unused)
+    """
+    def __init__(self, obs_dim: int, out_dim: int, hidden: int):
+        super().__init__()
+        self.fc1 = layer_init(nn.Linear(obs_dim, hidden))
+        self.fc2 = layer_init(nn.Linear(hidden, hidden))
+        self.fc3 = layer_init(nn.Linear(hidden, out_dim), std=0.01)
+
+        # Key trick: slight positive bias to encourage initial pushing
+        with torch.no_grad():
+            self.fc3.bias[0].fill_(0.5)   # mu head bias
+            self.fc3.bias[1].fill_(-0.5)  # log_std head bias (moderate std)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = torch.relu(self.fc1(x))
         x = torch.nn.functional.elu(self.fc2(x))
-        mean = torch.tanh(self.mean_head(x))  # Clamp to [-1, 1]
-        std = torch.exp(self.log_std)
-        return mean, std
+        return self.fc3(x)
 
 
 class Critic(nn.Module):
-    """value function V(s; w) - ReLU/ELU architecture matching reference"""
-    def __init__(self, obs_dim: int = 6, hidden: int = 256):
+    def __init__(self, obs_dim: int, hidden: int):
         super().__init__()
-        self.obs_dim = 6
-        self.fc1 = layer_init(nn.Linear(self.obs_dim, hidden))
+        self.fc1 = layer_init(nn.Linear(obs_dim, hidden))
         self.fc2 = layer_init(nn.Linear(hidden, hidden))
         self.fc3 = layer_init(nn.Linear(hidden, 1), std=1.0)
 
@@ -91,349 +156,298 @@ class Critic(nn.Module):
         return self.fc3(x).squeeze(-1)
 
 
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+# -----------------------------
+# Policy helpers
+# -----------------------------
+def sample_action_and_logprob(cfg: A2CConfig, actor_out: torch.Tensor):
+    mu = actor_out[0]
+    log_std = actor_out[1].clamp(cfg.log_std_min, cfg.log_std_max)
+    std = torch.exp(log_std)
 
+    dist = torch.distributions.Normal(mu, std)
+    a = dist.rsample()                 # scalar
+    a_clipped = torch.clamp(a, -1.0, 1.0)
 
-def step_env(env, api: str, action):
-    # Only wrap continuous (float) actions in array; discrete (int) actions pass through
-    if isinstance(action, float):
-        action = [action]
-    obs2, reward, terminated, truncated, info = env.step(action)
-    return obs2, float(reward), bool(terminated), bool(truncated), info
+    # Approx logprob: use unclipped sample's logprob (standard in many course solutions)
+    log_prob = dist.log_prob(a)        # scalar
+    entropy = dist.entropy()           # scalar
 
-def moving_average(x: list[float], window: int) -> np.ndarray:
-    """simple moving average"""
-    x = np.asarray(x, dtype=np.float32)
-    if window <= 1 or len(x) < window:
-        return x
-    kernel = np.ones(window, dtype=np.float32) / window
-    return np.convolve(x, kernel, mode="valid")
-
-def plot_learning_curves(
-    train_returns: list[float],
-    avg100_returns: list[float],
-    eval_returns: list[float],
-    eval_every: int,
-    out_path: str = "plots/actor_critic_learning_curve.png",
-    ma_window: int = 50,
-    title: str = "Actor-Critic learning curve",
-) -> None:
-    out = Path(out_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-
-    episodes = np.arange(1, len(train_returns) + 1)
-    eval_episodes = np.arange(eval_every, eval_every * len(eval_returns) + 1, eval_every)
-
-    plt.figure(figsize=(12, 6))
-
-    plt.subplot(2, 1, 1)
-    plt.plot(episodes, train_returns, alpha=0.4, label="Reward per episode")
-    ma = moving_average(train_returns, ma_window)
-    if len(ma) > 1:
-        ma_x = np.arange(ma_window, ma_window + len(ma))
-        plt.plot(ma_x, ma, linewidth=2, label=f"Reward (MA{ma_window})")
-    plt.xlabel("Episode")
-    plt.ylabel("Reward")
-    plt.title(title)
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-
-    plt.subplot(2, 1, 2)
-    plt.plot(episodes, avg100_returns, linewidth=2, label="Avg reward (last 100 episodes)")
-    if len(eval_returns) > 0:
-        plt.plot(eval_episodes, eval_returns, marker="o", linewidth=1.5, label="Eval avg return")
-    plt.xlabel("Episode")
-    plt.ylabel("Reward")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-
-    plt.tight_layout()
-    plt.savefig(out, dpi=150)
-    plt.close()
-    print(f"Saved learning curves to {out_path}")
-
-
-def compute_td_advantages(
-    rewards: list[float],
-    values: list[torch.Tensor],
-    next_values: list[torch.Tensor],
-    dones: list[bool],
-    gamma: float
-) -> torch.Tensor:
-    """
-    compute TD(0) advantages: δ_t = r_t + γ * V(s_{t+1}) * (1 - done) - V(s_t)
-    
-    the difference from REINFORCE with Baseline:
-    - reinforce uses monte-carlo returns: A_t = G_t - V(s_t)
-    - actor-critic uses td-error: δ_t = r + γV(s') - V(s)
-    """
-
-    advantages = []
-    for r, v, v_next, done in zip(rewards, values, next_values, dones):
-        # td-error: δ = r + γV(s') - V(s)
-        bootstrap = 0.0 if done else v_next.item()
-        td_target = r + gamma * bootstrap
-        td_error = td_target - v.item()
-        advantages.append(td_error)
-    return torch.tensor(advantages, dtype=torch.float32)
+    # env expects shape (1,)
+    return a_clipped.unsqueeze(0), log_prob, entropy
 
 
 @torch.no_grad()
-def evaluate_policy(cfg: A2CConfig, actor: Actor, episodes: int = 10) -> float:
-    """evaluate policy using mean action selection"""
-    was_training = actor.training
-    actor.eval()
+def evaluate_policy_greedy(cfg: A2CConfig, actor: Actor, scaler: StandardScaler, episodes: int) -> float:
     env = gym.make(cfg.env_name)
-    api = "gymnasium"
-
     returns = []
+
+    actor_was_training = actor.training
+    actor.eval()
+
     for i in range(episodes):
-        obs, _ = env.reset(seed=cfg.seed + 10000 + i)
+        obs, _ = env.reset(seed=cfg.seed + 10_000 + i)
         done = False
         ep_ret = 0.0
+
         while not done:
-            obs_t = torch.as_tensor(pad_observation(obs), dtype=torch.float32)
-            mean, std = actor(obs_t)
-            action = torch.clamp(mean, -1.0, 1.0).tolist()  # Use mean (greedy)
-            obs, r, terminated, truncated, _ = step_env(env, api, action)
-            done = terminated or truncated
-            ep_ret += r
+            obs_norm = scaler.transform(np.asarray(obs, dtype=np.float32).reshape(1, -1)).flatten()
+            obs_pad = pad_observation(obs_norm, cfg.fixed_obs_dim)
+            obs_t = torch.as_tensor(obs_pad, dtype=torch.float32)
+
+            out = actor(obs_t)
+            mu = out[0]
+            action = torch.clamp(mu, -1.0, 1.0)  # greedy mean, clipped to bounds
+            action_np = action.cpu().numpy().astype(np.float32).reshape(1,)
+
+            obs, r, terminated, truncated, _ = env.step(action_np)
+            done = bool(terminated or truncated)
+            ep_ret += float(r)
+
         returns.append(ep_ret)
+
     env.close()
-    if was_training:
+    if actor_was_training:
         actor.train()
     return float(np.mean(returns))
 
-def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
-    """Train actor-critic agent and return results with timing statistics.
-    
-    Returns:
-        episode_returns: list of returns per episode
-        solved_ep: episode at which solve threshold was reached (-1 if not solved)
-        best_greedy: best greedy evaluation return
-        elapsed_time: total training time in seconds
-        num_iterations: total number of training iterations
-    """
-    start_time = time.time()
+
+# -----------------------------
+# Training
+# -----------------------------
+def train(cfg: A2CConfig):
     set_seed(cfg.seed)
 
     env = gym.make(cfg.env_name)
-    api =  "gymnasium"
-    obs, _ = env.reset(seed=cfg.seed)
+    obs0, _ = env.reset(seed=cfg.seed)
 
-    obs_dim = int(np.asarray(obs).shape[0])
-    
-    # Use fixed 6 input, 3 continuous outputs for meta-learning
-    fixed_obs_dim = 6
-    fixed_act_dim = 3
-    
-    print(f"Environment: {cfg.env_name}")
-    print(f"Original observation size: {obs_dim}")
-    print(f"Padded observation size (input): {fixed_obs_dim}")
-    print(f"Network output size (continuous): {fixed_act_dim}")
-    print(f"Hidden layer size: {cfg.hidden}")
+    # ---- Fit scaler on actual trajectories (much better than random samples) ----
+    print("Collecting initial trajectories for scaler...")
+    scaler_obs = []
+    for _ in range(50):  # 50 random episodes
+        o, _ = env.reset()
+        for _ in range(200):  # max steps
+            scaler_obs.append(o.copy())
+            a = env.action_space.sample()
+            o, _, term, trunc, _ = env.step(a)
+            if term or trunc:
+                break
+    scaler = StandardScaler()
+    scaler.fit(np.array(scaler_obs, dtype=np.float32))
+    print(f"Scaler fitted on {len(scaler_obs)} observations")
 
-    actor = Actor(fixed_obs_dim, fixed_act_dim, cfg.hidden)
-    critic = Critic(fixed_obs_dim, cfg.hidden)
+    actor = Actor(cfg.fixed_obs_dim, cfg.fixed_actor_out_dim, cfg.hidden)
+    critic = Critic(cfg.fixed_obs_dim, cfg.hidden)
 
-    # adam optimizer
     opt_actor = torch.optim.Adam(actor.parameters(), lr=cfg.lr_actor)
     opt_critic = torch.optim.Adam(critic.parameters(), lr=cfg.lr_critic)
 
-    # learning rate schedulers
-    scheduler_actor = StepLR(opt_actor, step_size=cfg.lr_step_size, gamma=cfg.lr_gamma)
-    scheduler_critic = StepLR(opt_critic, step_size=cfg.lr_step_size, gamma=cfg.lr_gamma)
+    print(f"Environment: {cfg.env_name}")
+    print(f"Original observation size: {np.asarray(obs0).shape[0]}")
+    print(f"Padded observation size (input): {cfg.fixed_obs_dim}")
+    print(f"Network output size (fixed): {cfg.fixed_actor_out_dim}")
+    print("Action bounds: [-1.0, 1.0]")
+    print(f"Hidden layer size: {cfg.hidden}")
 
-    episode_returns = []
-    avg100_returns = []
-    eval_returns = []  
-    solved_ep = -1
+    train_returns = []
+    eval_returns = []
+
     best_greedy = -1e9
     best_actor_state = None
-    last_greedy = float("nan")
-    total_iterations = 0
+    solved_ep = -1
+
+    start_time = time.time()
 
     for ep in range(cfg.max_episodes):
         obs, _ = env.reset(seed=cfg.seed + ep)
         done = False
-        
-        states = []
-        actions = []
+        ep_ret = 0.0
+
         log_probs = []
         entropies = []
         values = []
-        next_values = []
-        rewards = []
-        dones = [] 
+        targets = []
+        advantages = []
+        I_weights = []
+
+        I = 1.0
 
         while not done:
-            obs_t = torch.as_tensor(pad_observation(obs), dtype=torch.float32)
-            # actor: sample action from continuous distribution (3D)
-            mean, std = actor(obs_t)
-            dist = torch.distributions.Normal(mean, std)
-            action_t = dist.sample()
-            action = torch.clamp(action_t, -1.0, 1.0).tolist()  # 3D continuous action
-            log_prob = dist.log_prob(action_t).sum()
-            entropy = dist.entropy().sum()
-            
-            # critic: estimate value
+            # Normalize + pad
+            obs_norm = scaler.transform(np.asarray(obs, dtype=np.float32).reshape(1, -1)).flatten()
+            obs_pad = pad_observation(obs_norm, cfg.fixed_obs_dim)
+            obs_t = torch.as_tensor(obs_pad, dtype=torch.float32)
+
+            out = actor(obs_t)
+            action_t, log_prob, entropy = sample_action_and_logprob(cfg, out)
             value = critic(obs_t)
+
+            # Step env (detach!)
+            action_np = action_t.detach().cpu().numpy().astype(np.float32)
+            obs2, r, terminated, truncated, _ = env.step(action_np)
+            done = bool(terminated or truncated)
+
+            # Reward shaping based on ENERGY (potential + kinetic)
+            # This encourages building momentum - key for MountainCar!
+            # Position: obs[0] in [-1.2, 0.6], Velocity: obs[1] in [-0.07, 0.07]
+            # Goal: position >= 0.45
             
-            # environment step
-            obs2, reward, terminated, truncated, _ = step_env(env, api, action)
-            done = terminated or truncated
+            # Potential energy proxy: height = sin(3 * position)
+            height_old = np.sin(3 * obs[0])
+            height_new = np.sin(3 * obs2[0])
             
-            # next state value
+            # Kinetic energy proxy: 0.5 * v^2 (scaled up)
+            kinetic_old = 0.5 * obs[1] ** 2
+            kinetic_new = 0.5 * obs2[1] ** 2
+            
+            # Total energy increase (scaled for learning signal)
+            energy_bonus = 100.0 * ((height_new + 50 * kinetic_new) - (height_old + 50 * kinetic_old))
+            
+            # Extra bonus for being close to goal
+            if obs2[0] >= 0.45:
+                energy_bonus += 100.0  # reached goal!
+            elif obs2[0] > 0.3:
+                energy_bonus += 10.0   # getting close
+                
+            r = r + energy_bonus
+
+            # Critic bootstrap
             with torch.no_grad():
-                obs2_t = torch.as_tensor(pad_observation(obs2), dtype=torch.float32)
+                obs2_norm = scaler.transform(np.asarray(obs2, dtype=np.float32).reshape(1, -1)).flatten()
+                obs2_pad = pad_observation(obs2_norm, cfg.fixed_obs_dim)
+                obs2_t = torch.as_tensor(obs2_pad, dtype=torch.float32)
                 next_value = critic(obs2_t)
-            
-            # store transition
-            states.append(obs_t)
-            actions.append(action_t)
+                bootstrap = 0.0 if done else next_value.item()
+                td_target = float(r) + cfg.gamma * bootstrap
+                td_error = td_target - value.item()
+
+            # Store
             log_probs.append(log_prob)
             entropies.append(entropy)
             values.append(value)
-            next_values.append(next_value)
-            rewards.append(reward)
-            dones.append(terminated)
-            
+            targets.append(td_target)
+            advantages.append(td_error)
+            I_weights.append(I)
+
+            ep_ret += float(r)
             obs = obs2
+            I *= cfg.gamma
 
-        ep_ret = sum(rewards)
-        episode_returns.append(ep_ret)
-        total_iterations += len(rewards)  # Count total training steps
+        # Convert to tensors
+        log_probs_t = torch.stack(log_probs)
+        entropies_t = torch.stack(entropies)
+        values_t = torch.stack(values)
+        targets_t = torch.tensor(targets, dtype=torch.float32)
+        adv_t = torch.tensor(advantages, dtype=torch.float32)
 
-        log_probs_t = torch.stack(log_probs) 
-        entropies_t = torch.stack(entropies) 
-        values_t = torch.stack(values)     
+        if cfg.normalize_advantages and len(adv_t) > 1:
+            adv_t = (adv_t - adv_t.mean()) / (adv_t.std() + 1e-8)
 
-        advantages = compute_td_advantages(rewards, values, next_values, dones, cfg.gamma)
-        
-        if cfg.normalize_advantages and len(advantages) > 1:
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        if cfg.use_I_weight:
+            I_t = torch.tensor(I_weights, dtype=torch.float32)
+        else:
+            I_t = torch.ones_like(adv_t)
 
+        # Losses
+        actor_loss = -(log_probs_t * adv_t * I_t).mean()
+        entropy_bonus = cfg.entropy_coef * entropies_t.mean()
+        critic_loss = cfg.value_loss_coef * ((targets_t - values_t) ** 2).mean()
 
-        actor_loss = -(log_probs_t * advantages).mean()
-        entropy_loss = -cfg.entropy_coef * entropies_t.mean()
-
-        td_targets = []
-        for r, v_next, terminal in zip(rewards, next_values, dones):
-            bootstrap = 0.0 if terminal else v_next.item()
-            td_targets.append(r + cfg.gamma * bootstrap)
-        td_targets_t = torch.tensor(td_targets, dtype=torch.float32)
-        
-        critic_loss = cfg.value_loss_coef * ((td_targets_t - values_t) ** 2).mean()
-
-        total_loss = actor_loss + critic_loss + entropy_loss
+        total_loss = actor_loss + critic_loss - entropy_bonus
 
         opt_actor.zero_grad()
         opt_critic.zero_grad()
         total_loss.backward()
-        
+
         if cfg.max_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(actor.parameters(), cfg.max_grad_norm)
             torch.nn.utils.clip_grad_norm_(critic.parameters(), cfg.max_grad_norm)
-        
+
         opt_actor.step()
         opt_critic.step()
 
-        scheduler_actor.step()
-        scheduler_critic.step()
+        train_returns.append(ep_ret)
 
-        for param_group in opt_actor.param_groups:
-            param_group['lr'] = max(param_group['lr'], cfg.min_lr)
-        for param_group in opt_critic.param_groups:
-            param_group['lr'] = max(param_group['lr'], cfg.min_lr)
-
-        avg100 = float(np.mean(episode_returns[-100:])) if len(episode_returns) >= 100 else float("nan")
-        avg100_returns.append(avg100) 
-
+        # Greedy evaluation
         if (ep + 1) % cfg.eval_every == 0:
-            last_greedy = evaluate_policy(cfg, actor, episodes=cfg.eval_episodes)
-            eval_returns.append(last_greedy) 
-            if last_greedy > best_greedy:
-                best_greedy = last_greedy
+            greedy = evaluate_policy_greedy(cfg, actor, scaler, cfg.eval_episodes)
+            eval_returns.append(greedy)
+
+            if greedy > best_greedy:
+                best_greedy = greedy
                 best_actor_state = deepcopy(actor.state_dict())
-            
+
+            avg100 = float(np.mean(train_returns[-100:])) if len(train_returns) >= 100 else float("nan")
             print(
-                f"Episode {ep+1:5d} | "
-                f"train_return={ep_ret:8.2f} | "
-                f"avg100={avg100:8.2f} | "
-                f"eval_avg={last_greedy:8.2f}"
+                f"Episode {ep+1:4d}/{cfg.max_episodes} | "
+                f"train_return={ep_ret:8.2f} | avg100={avg100:8.2f} | eval_avg={greedy:8.2f}"
             )
 
-        if best_greedy >= cfg.solve_score:
-            solved_ep = ep + 1
-            print(f"SOLVED at episode {solved_ep} with best_greedy={best_greedy:.1f}")
-            break
+            if best_greedy >= cfg.solve_score:
+                solved_ep = ep + 1
+                print(f"SOLVED at episode {solved_ep} with best_greedy={best_greedy:.1f}")
+                break
 
     env.close()
-    elapsed_time = time.time() - start_time
-    
+
+    # Restore best actor
     if best_actor_state is not None:
         actor.load_state_dict(best_actor_state)
-    
-    final_eval = evaluate_policy(cfg, actor, episodes=cfg.eval_episodes)
-    print(f"Final greedy eval ({cfg.eval_episodes} eps): {final_eval:.1f}")
-    print(f"\n--- Training Statistics ---")
-    print(f"Total episodes: {ep + 1}")
-    print(f"Total training iterations: {total_iterations}")
-    print(f"Elapsed time: {elapsed_time:.2f} seconds")
-    print(f"Solved at episode: {solved_ep if solved_ep != -1 else 'Not solved'}")
-    print(f"Best greedy return: {best_greedy:.2f}")
-    
-    plot_learning_curves(
-        train_returns=episode_returns,
-        avg100_returns=avg100_returns,
-        eval_returns=eval_returns,
-        eval_every=cfg.eval_every,
-        out_path="plots/mountaincar_actor_critic.png",
-        ma_window=50,
-        title=f"Actor-Critic (TD-based) - {cfg.env_name}",
-    )
-    
-    results_dir = Path("results")
-    results_dir.mkdir(parents=True, exist_ok=True)
+
+    final_eval = evaluate_policy_greedy(cfg, actor, scaler, cfg.eval_episodes)
+    elapsed = time.time() - start_time
+
+    print(f"Final greedy eval ({cfg.eval_episodes} eps): {final_eval:.2f}")
+    print(f"Best greedy eval: {best_greedy:.2f}")
+    print(f"Solved episode: {solved_ep if solved_ep != -1 else 'Not solved'}")
+    print(f"Elapsed time: {elapsed:.2f}s")
+
+    # Save plot + results
+    plot_learning_curves(train_returns, eval_returns, cfg.eval_every, cfg.plot_path)
+
+    Path("results").mkdir(parents=True, exist_ok=True)
     np.savez(
-        results_dir / "mountaincar_actor_critic.npz",
-        train_returns=np.array(episode_returns),
-        avg100_returns=np.array(avg100_returns),
-        eval_returns=np.array(eval_returns),
+        "results/mountaincarcontinuous_actor_critic.npz",
+        train_returns=np.array(train_returns, dtype=np.float32),
+        eval_returns=np.array(eval_returns, dtype=np.float32),
         eval_every=cfg.eval_every,
-        solved_ep=solved_ep if solved_ep != -1 else -1,
+        solved_ep=solved_ep,
         best_greedy=best_greedy,
-        elapsed_time=elapsed_time,
-        total_iterations=total_iterations,
+        final_eval=final_eval,
+        elapsed=elapsed,
     )
-    
-    return episode_returns, solved_ep, best_greedy, elapsed_time, total_iterations
 
 
 def main():
     cfg = A2CConfig(
         env_name="MountainCarContinuous-v0",
         gamma=0.99,
-        lr_actor=5e-3,
-        lr_critic=2e-2,
-        lr_step_size=40,
-        lr_gamma=0.7,
-        min_lr=1e-4,
+        lr_actor=1e-4,       # Lower actor LR for stability
+        lr_critic=5e-4,      # Lower critic LR
         hidden=256,
-        entropy_coef=0.05,
+
+        # Key for escaping the "do nothing" optimum:
+        entropy_coef=0.01,   # Moderate entropy
+
         value_loss_coef=0.5,
-        max_grad_norm=0.5,
-        normalize_advantages=True,
-        max_episodes=2000,
-        seed=543,
-        print_every=10,
-        eval_every=50,
+        normalize_advantages=False,  # Don't normalize - keep signal
+        max_grad_norm=0.5,           # Tighter gradient clipping
+
+        max_episodes=300,
+        seed=123,
+        eval_every=10,
         eval_episodes=10,
         solve_score=90.0,
+
+        fixed_obs_dim=6,
+        fixed_actor_out_dim=3,
+
+        log_std_min=-3.0,
+        log_std_max=1.0,
+
+        use_I_weight=True,
+        plot_path="plots/mountaincarcontinuous_actor_critic.png",
     )
+
     print("\n=== Hyperparameters ===")
     print(f"gamma: {cfg.gamma}")
     print(f"lr_actor: {cfg.lr_actor}")
@@ -444,9 +458,8 @@ def main():
     print(f"max_episodes: {cfg.max_episodes}")
     print(f"solve_score: {cfg.solve_score}")
     print("=======================\n")
-    returns, solved_ep, best_greedy, elapsed_time, total_iterations = train_a2c(cfg)
-    print(f"Done. episodes={len(returns)}, solved_ep={solved_ep}, best_greedy={best_greedy:.1f}")
-    print(f"Elapsed time: {elapsed_time:.2f}s, Total iterations: {total_iterations}")
+
+    train(cfg)
 
 
 if __name__ == "__main__":
