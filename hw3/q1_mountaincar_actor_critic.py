@@ -1,5 +1,12 @@
 # ============================================================
-#  Section 1 – Training Individual Networks (MountainCar-v0)
+#  Section 1 – Training Individual Networks (MountainCarContinuous-v0)
+#  Actor-Critic (TD(0)) with HW-compatible fixed input/output sizes
+#
+#  Key fixes vs your current file:
+#   1) Keep TRUE env reward separate from shaped reward (no "fake" 500 returns)
+#   2) Greedy evaluation uses tanh(mu) (avoids constant +/-1 action, eval ~ -25)
+#   3) Shaping (optional) is used ONLY for learning targets/advantages
+#   4) Solve criterion is based on greedy evaluation on TRUE env reward
 # ============================================================
 
 from dataclasses import dataclass
@@ -25,20 +32,20 @@ class A2CConfig:
 
     # RL
     gamma: float = 0.99
-    lr_actor: float = 3e-4
-    lr_critic: float = 1e-3
+    lr_actor: float = 1e-4
+    lr_critic: float = 5e-4
     hidden: int = 256
-    entropy_coef: float = 0.02
+    entropy_coef: float = 0.01
     value_loss_coef: float = 0.5
-    normalize_advantages: bool = True
-    max_grad_norm: float = 1.0
+    normalize_advantages: bool = False
+    max_grad_norm: float = 0.5
 
     # Training
     max_episodes: int = 300
     seed: int = 123
     eval_every: int = 10
     eval_episodes: int = 10
-    solve_score: float = 90.0        # greedy-eval threshold
+    solve_score: float = 90.0  # greedy-eval threshold (TRUE env return)
 
     # Fixed IO sizes (HW requirement)
     fixed_obs_dim: int = 6
@@ -50,6 +57,9 @@ class A2CConfig:
 
     # Optional: per-step discount accumulator I_t (as in TF ref)
     use_I_weight: bool = True
+
+    # Reward shaping toggle (learning only)
+    use_reward_shaping: bool = True
 
     # Plotting
     plot_path: str = "plots/mountaincarcontinuous_actor_critic.png"
@@ -85,27 +95,27 @@ def moving_average(x: list[float], window: int) -> np.ndarray:
     return np.convolve(x, kernel, mode="valid")
 
 
-def plot_learning_curves(train_returns, eval_returns, eval_every, out_path):
+def plot_learning_curves(train_returns_env, eval_returns, eval_every, out_path):
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    episodes = np.arange(1, len(train_returns) + 1)
+    episodes = np.arange(1, len(train_returns_env) + 1)
     eval_x = np.arange(eval_every, eval_every * len(eval_returns) + 1, eval_every)
 
     plt.figure(figsize=(12, 6))
     plt.subplot(2, 1, 1)
-    plt.plot(episodes, train_returns, alpha=0.35, label="Train return")
-    ma = moving_average(train_returns, 20)
+    plt.plot(episodes, train_returns_env, alpha=0.35, label="Train return (env)")
+    ma = moving_average(train_returns_env, 20)
     if len(ma) > 1:
         ma_x = np.arange(20, 20 + len(ma))
-        plt.plot(ma_x, ma, linewidth=2, label="Train return (MA20)")
+        plt.plot(ma_x, ma, linewidth=2, label="Train return (env, MA20)")
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.ylabel("Return")
 
     plt.subplot(2, 1, 2)
     if len(eval_returns) > 0:
-        plt.plot(eval_x, eval_returns, marker="o", linewidth=1.5, label="Greedy eval avg")
+        plt.plot(eval_x, eval_returns, marker="o", linewidth=1.5, label="Greedy eval avg (env)")
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.xlabel("Episode")
@@ -132,10 +142,10 @@ class Actor(nn.Module):
         self.fc2 = layer_init(nn.Linear(hidden, hidden))
         self.fc3 = layer_init(nn.Linear(hidden, out_dim), std=0.01)
 
-        # Key trick: slight positive bias to encourage initial pushing
+        # Mild bias to avoid "do nothing" optimum (keep small)
         with torch.no_grad():
-            self.fc3.bias[0].fill_(0.5)   # mu head bias
-            self.fc3.bias[1].fill_(-0.5)  # log_std head bias (moderate std)
+            self.fc3.bias[0].fill_(0.2)   # mu bias (small push)
+            self.fc3.bias[1].fill_(-0.5)  # log_std bias (moderate std)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = torch.relu(self.fc1(x))
@@ -160,24 +170,35 @@ class Critic(nn.Module):
 # Policy helpers
 # -----------------------------
 def sample_action_and_logprob(cfg: A2CConfig, actor_out: torch.Tensor):
+    """
+    Stochastic policy for training:
+      - Sample a ~ Normal(mu, std)
+      - Use tanh(a) to bound into [-1, 1] (action actually sent to env)
+      - Use log_prob with tanh correction for consistency
+    """
     mu = actor_out[0]
     log_std = actor_out[1].clamp(cfg.log_std_min, cfg.log_std_max)
     std = torch.exp(log_std)
 
     dist = torch.distributions.Normal(mu, std)
-    a = dist.rsample()                 # scalar
-    a_clipped = torch.clamp(a, -1.0, 1.0)
+    pre_tanh = dist.rsample()                 # scalar
+    action = torch.tanh(pre_tanh)             # scalar in [-1, 1]
 
-    # Approx logprob: use unclipped sample's logprob (standard in many course solutions)
-    log_prob = dist.log_prob(a)        # scalar
-    entropy = dist.entropy()           # scalar
+    # log pi(a) with tanh correction: log p(u) - log(1 - tanh(u)^2)
+    log_prob_u = dist.log_prob(pre_tanh)
+    correction = torch.log(1.0 - action.pow(2) + 1e-6)
+    log_prob = (log_prob_u - correction).squeeze()
+    entropy = dist.entropy().squeeze()
 
-    # env expects shape (1,)
-    return a_clipped.unsqueeze(0), log_prob, entropy
+    return action.unsqueeze(0), log_prob, entropy
 
 
 @torch.no_grad()
 def evaluate_policy_greedy(cfg: A2CConfig, actor: Actor, scaler: StandardScaler, episodes: int) -> float:
+    """
+    Greedy evaluation on TRUE env reward:
+      a = tanh(mu)
+    """
     env = gym.make(cfg.env_name)
     returns = []
 
@@ -187,7 +208,7 @@ def evaluate_policy_greedy(cfg: A2CConfig, actor: Actor, scaler: StandardScaler,
     for i in range(episodes):
         obs, _ = env.reset(seed=cfg.seed + 10_000 + i)
         done = False
-        ep_ret = 0.0
+        ep_ret_env = 0.0
 
         while not done:
             obs_norm = scaler.transform(np.asarray(obs, dtype=np.float32).reshape(1, -1)).flatten()
@@ -196,19 +217,42 @@ def evaluate_policy_greedy(cfg: A2CConfig, actor: Actor, scaler: StandardScaler,
 
             out = actor(obs_t)
             mu = out[0]
-            action = torch.clamp(mu, -1.0, 1.0)  # greedy mean, clipped to bounds
+            action = torch.tanh(mu)  # key change: consistent bounded mean action
             action_np = action.cpu().numpy().astype(np.float32).reshape(1,)
 
-            obs, r, terminated, truncated, _ = env.step(action_np)
+            obs, r_env, terminated, truncated, _ = env.step(action_np)
             done = bool(terminated or truncated)
-            ep_ret += float(r)
+            ep_ret_env += float(r_env)
 
-        returns.append(ep_ret)
+        returns.append(ep_ret_env)
 
     env.close()
     if actor_was_training:
         actor.train()
     return float(np.mean(returns))
+
+
+# -----------------------------
+# Reward shaping (optional, learning only)
+# -----------------------------
+def shaped_reward_energy(obs: np.ndarray, obs2: np.ndarray, r_env: float) -> float:
+    """
+    Energy-based shaping used ONLY for learning (targets/advantages), not for reporting.
+    """
+    height_old = np.sin(3 * obs[0])
+    height_new = np.sin(3 * obs2[0])
+
+    kinetic_old = 0.5 * obs[1] ** 2
+    kinetic_new = 0.5 * obs2[1] ** 2
+
+    energy_bonus = 100.0 * ((height_new + 50 * kinetic_new) - (height_old + 50 * kinetic_old))
+
+    if obs2[0] >= 0.45:
+        energy_bonus += 100.0
+    elif obs2[0] > 0.3:
+        energy_bonus += 10.0
+
+    return float(r_env) + float(energy_bonus)
 
 
 # -----------------------------
@@ -220,12 +264,12 @@ def train(cfg: A2CConfig):
     env = gym.make(cfg.env_name)
     obs0, _ = env.reset(seed=cfg.seed)
 
-    # ---- Fit scaler on actual trajectories (much better than random samples) ----
+    # ---- Fit scaler on actual trajectories ----
     print("Collecting initial trajectories for scaler...")
     scaler_obs = []
     for _ in range(50):  # 50 random episodes
         o, _ = env.reset()
-        for _ in range(200):  # max steps
+        for _ in range(200):
             scaler_obs.append(o.copy())
             a = env.action_space.sample()
             o, _, term, trunc, _ = env.step(a)
@@ -248,7 +292,7 @@ def train(cfg: A2CConfig):
     print("Action bounds: [-1.0, 1.0]")
     print(f"Hidden layer size: {cfg.hidden}")
 
-    train_returns = []
+    train_returns_env = []
     eval_returns = []
 
     best_greedy = -1e9
@@ -260,7 +304,9 @@ def train(cfg: A2CConfig):
     for ep in range(cfg.max_episodes):
         obs, _ = env.reset(seed=cfg.seed + ep)
         done = False
-        ep_ret = 0.0
+
+        ep_ret_env = 0.0      # TRUE env return (for reporting)
+        ep_ret_shaped = 0.0   # shaped return (for debugging)
 
         log_probs = []
         entropies = []
@@ -283,32 +329,20 @@ def train(cfg: A2CConfig):
 
             # Step env (detach!)
             action_np = action_t.detach().cpu().numpy().astype(np.float32)
-            obs2, r, terminated, truncated, _ = env.step(action_np)
+            obs2, r_env, terminated, truncated, _ = env.step(action_np)
             done = bool(terminated or truncated)
 
-            # Reward shaping based on ENERGY (potential + kinetic)
-            # This encourages building momentum - key for MountainCar!
-            # Position: obs[0] in [-1.2, 0.6], Velocity: obs[1] in [-0.07, 0.07]
-            # Goal: position >= 0.45
-            
-            # Potential energy proxy: height = sin(3 * position)
-            height_old = np.sin(3 * obs[0])
-            height_new = np.sin(3 * obs2[0])
-            
-            # Kinetic energy proxy: 0.5 * v^2 (scaled up)
-            kinetic_old = 0.5 * obs[1] ** 2
-            kinetic_new = 0.5 * obs2[1] ** 2
-            
-            # Total energy increase (scaled for learning signal)
-            energy_bonus = 100.0 * ((height_new + 50 * kinetic_new) - (height_old + 50 * kinetic_old))
-            
-            # Extra bonus for being close to goal
-            if obs2[0] >= 0.45:
-                energy_bonus += 100.0  # reached goal!
-            elif obs2[0] > 0.3:
-                energy_bonus += 10.0   # getting close
-                
-            r = r + energy_bonus
+            # Track TRUE env return
+            r_env_f = float(r_env)
+            ep_ret_env += r_env_f
+
+            # Learning reward (optionally shaped)
+            if cfg.use_reward_shaping:
+                r_learn = shaped_reward_energy(obs, obs2, r_env_f)
+            else:
+                r_learn = r_env_f
+
+            ep_ret_shaped += float(r_learn)
 
             # Critic bootstrap
             with torch.no_grad():
@@ -317,7 +351,7 @@ def train(cfg: A2CConfig):
                 obs2_t = torch.as_tensor(obs2_pad, dtype=torch.float32)
                 next_value = critic(obs2_t)
                 bootstrap = 0.0 if done else next_value.item()
-                td_target = float(r) + cfg.gamma * bootstrap
+                td_target = float(r_learn) + cfg.gamma * bootstrap
                 td_error = td_target - value.item()
 
             # Store
@@ -328,7 +362,6 @@ def train(cfg: A2CConfig):
             advantages.append(td_error)
             I_weights.append(I)
 
-            ep_ret += float(r)
             obs = obs2
             I *= cfg.gamma
 
@@ -365,9 +398,10 @@ def train(cfg: A2CConfig):
         opt_actor.step()
         opt_critic.step()
 
-        train_returns.append(ep_ret)
+        # Report TRUE env return
+        train_returns_env.append(ep_ret_env)
 
-        # Greedy evaluation
+        # Greedy evaluation on TRUE env return
         if (ep + 1) % cfg.eval_every == 0:
             greedy = evaluate_policy_greedy(cfg, actor, scaler, cfg.eval_episodes)
             eval_returns.append(greedy)
@@ -376,10 +410,14 @@ def train(cfg: A2CConfig):
                 best_greedy = greedy
                 best_actor_state = deepcopy(actor.state_dict())
 
-            avg100 = float(np.mean(train_returns[-100:])) if len(train_returns) >= 100 else float("nan")
+            avg100 = float(np.mean(train_returns_env[-100:])) if len(train_returns_env) >= 100 else float("nan")
+
             print(
                 f"Episode {ep+1:4d}/{cfg.max_episodes} | "
-                f"train_return={ep_ret:8.2f} | avg100={avg100:8.2f} | eval_avg={greedy:8.2f}"
+                f"train_env_return={ep_ret_env:8.2f} | "
+                f"train_learn_return={ep_ret_shaped:8.2f} | "
+                f"avg100_env={avg100:8.2f} | "
+                f"eval_avg_env={greedy:8.2f}"
             )
 
             if best_greedy >= cfg.solve_score:
@@ -396,24 +434,25 @@ def train(cfg: A2CConfig):
     final_eval = evaluate_policy_greedy(cfg, actor, scaler, cfg.eval_episodes)
     elapsed = time.time() - start_time
 
-    print(f"Final greedy eval ({cfg.eval_episodes} eps): {final_eval:.2f}")
-    print(f"Best greedy eval: {best_greedy:.2f}")
+    print(f"Final greedy eval (env, {cfg.eval_episodes} eps): {final_eval:.2f}")
+    print(f"Best greedy eval (env): {best_greedy:.2f}")
     print(f"Solved episode: {solved_ep if solved_ep != -1 else 'Not solved'}")
     print(f"Elapsed time: {elapsed:.2f}s")
 
-    # Save plot + results
-    plot_learning_curves(train_returns, eval_returns, cfg.eval_every, cfg.plot_path)
+    # Save plot + results (TRUE env returns)
+    plot_learning_curves(train_returns_env, eval_returns, cfg.eval_every, cfg.plot_path)
 
     Path("results").mkdir(parents=True, exist_ok=True)
     np.savez(
         "results/mountaincarcontinuous_actor_critic.npz",
-        train_returns=np.array(train_returns, dtype=np.float32),
-        eval_returns=np.array(eval_returns, dtype=np.float32),
+        train_env_returns=np.array(train_returns_env, dtype=np.float32),
+        eval_env_returns=np.array(eval_returns, dtype=np.float32),
         eval_every=cfg.eval_every,
         solved_ep=solved_ep,
         best_greedy=best_greedy,
         final_eval=final_eval,
         elapsed=elapsed,
+        used_reward_shaping=cfg.use_reward_shaping,
     )
 
 
@@ -421,30 +460,24 @@ def main():
     cfg = A2CConfig(
         env_name="MountainCarContinuous-v0",
         gamma=0.99,
-        lr_actor=1e-4,       # Lower actor LR for stability
-        lr_critic=5e-4,      # Lower critic LR
+        lr_actor=1e-4,
+        lr_critic=5e-4,
         hidden=256,
-
-        # Key for escaping the "do nothing" optimum:
-        entropy_coef=0.01,   # Moderate entropy
-
+        entropy_coef=0.01,
         value_loss_coef=0.5,
-        normalize_advantages=False,  # Don't normalize - keep signal
-        max_grad_norm=0.5,           # Tighter gradient clipping
-
+        normalize_advantages=False,
+        max_grad_norm=0.5,
         max_episodes=300,
         seed=123,
         eval_every=10,
         eval_episodes=10,
         solve_score=90.0,
-
         fixed_obs_dim=6,
         fixed_actor_out_dim=3,
-
         log_std_min=-3.0,
         log_std_max=1.0,
-
         use_I_weight=True,
+        use_reward_shaping=True,  # set False if you must not shape rewards for HW
         plot_path="plots/mountaincarcontinuous_actor_critic.png",
     )
 
