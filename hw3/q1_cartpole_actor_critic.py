@@ -407,6 +407,13 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
         total_iterations=total_iterations,
     )
     
+    # Save model for transfer learning (Section 2)
+    models_dir = Path("models")
+    models_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(actor.state_dict(), models_dir / "cartpole_actor.pt")
+    torch.save(critic.state_dict(), models_dir / "cartpole_critic.pt")
+    print(f"Saved models to {models_dir}/")
+    
     return episode_returns, solved_ep, best_greedy, elapsed_time, total_iterations
 
 

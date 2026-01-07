@@ -1,6 +1,7 @@
-# ============================================
-# Section 1 – Training Individual Networks (Acrobot-v1)
-# ============================================
+# ============================================================
+#  Section 2a – Fine-tuning Pretrained Networks
+#  Task: Acrobot → CartPole (discrete → discrete)
+# ============================================================
 
 from dataclasses import dataclass
 from copy import deepcopy
@@ -15,32 +16,53 @@ import torch.nn as nn
 from torch.optim.lr_scheduler import StepLR
 import gymnasium as gym
 
-@dataclass
-class A2CConfig:
-    env_name: str = "Acrobot-v1"
 
+@dataclass
+class TransferConfig:
+    # Source and target environments
+    source_env: str = "Acrobot-v1"
+    target_env: str = "CartPole-v1"
+    
+    # Pretrained model path
+    pretrained_path: str = "models/acrobot_actor.pt"
+    
+    # Training hyperparameters (fine-tuning uses lower LR)
     gamma: float = 0.99
-    lr_actor: float = 2e-3
+    lr_actor: float = 1e-3   # LR for fine-tuning
     lr_critic: float = 1e-3
     hidden: int = 256
-
-    #learning rate decay
-    lr_step_size: int = 40
-    lr_gamma: float = 0.7
-    min_lr: float = 1e-4
-
-    entropy_coef: float = 0.01
-    value_loss_coef: float = 0.5
+    
+    # LR decay
+    lr_step_size: int = 100
+    lr_gamma: float = 0.95
+    min_lr: float = 1e-5
+    
+    # Loss coefficients
+    entropy_coef: float = 0.05
+    value_loss_coef: float = 0.25
     max_grad_norm: float = 0.5
     normalize_advantages: bool = True
-
-    max_episodes: int = 2000
-    seed: int = 543
-
+    
+    # GAE option
+    use_gae: bool = False
+    gae_lambda: float = 0.95
+    
+    # Reward shaping option
+    use_reward_shaping: bool = False
+    
+    # Transfer learning options
+    freeze_hidden_layers: bool = True   # Freeze fc1, fc2 from pretrained
+    reinit_output_layer: bool = True    # Reinitialize fc3 for new task
+    
+    # Training settings
+    max_episodes: int = 1000  # More episodes for convergence
+    seed: int = 123
+    
+    # Evaluation
     print_every: int = 10
     eval_every: int = 25
     eval_episodes: int = 10
-    solve_score: float = -100.0  # Acrobot: solved when avg return >= -100
+    solve_score: float = 475.0  # CartPole solve threshold
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -58,8 +80,8 @@ def pad_observation(obs: np.ndarray, target_size: int = 6) -> np.ndarray:
 
 
 class Actor(nn.Module):
-    """policy network π(a|s; θ) - ReLU/ELU architecture matching reference"""
-    def __init__(self, obs_dim: int = 6, act_dim: int = 3, hidden: int = 128):
+    """Policy network π(a|s; θ) - 6 input, 3 output for unified architecture"""
+    def __init__(self, obs_dim: int = 6, act_dim: int = 3, hidden: int = 256):
         super().__init__()
         self.obs_dim = 6
         self.act_dim = 3
@@ -74,8 +96,8 @@ class Actor(nn.Module):
 
 
 class Critic(nn.Module):
-    """value function V(s; w) - ReLU/ELU architecture matching reference"""
-    def __init__(self, obs_dim: int = 6, hidden: int = 128):
+    """Value function V(s; w) - 6 input for unified architecture"""
+    def __init__(self, obs_dim: int = 6, hidden: int = 256):
         super().__init__()
         self.obs_dim = 6
         self.fc1 = layer_init(nn.Linear(self.obs_dim, hidden))
@@ -94,26 +116,27 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
 
 
-def step_env(env, api: str, action: int):
+def step_env(env, action: int):
     obs2, reward, terminated, truncated, info = env.step(action)
     return obs2, float(reward), bool(terminated), bool(truncated), info
 
+
 def moving_average(x: list[float], window: int) -> np.ndarray:
-    """simple moving average"""
     x = np.asarray(x, dtype=np.float32)
     if window <= 1 or len(x) < window:
         return x
     kernel = np.ones(window, dtype=np.float32) / window
     return np.convolve(x, kernel, mode="valid")
 
+
 def plot_learning_curves(
     train_returns: list[float],
     avg100_returns: list[float],
     eval_returns: list[float],
     eval_every: int,
-    out_path: str = "plots/actor_critic_learning_curve.png",
+    out_path: str,
     ma_window: int = 50,
-    title: str = "Actor-Critic learning curve",
+    title: str = "Transfer Learning Curve",
 ) -> None:
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -157,17 +180,8 @@ def compute_td_advantages(
     dones: list[bool],
     gamma: float
 ) -> torch.Tensor:
-    """
-    compute TD(0) advantages: δ_t = r_t + γ * V(s_{t+1}) * (1 - done) - V(s_t)
-    
-    the difference from REINFORCE with Baseline:
-    - reinforce uses monte-carlo returns: A_t = G_t - V(s_t)
-    - actor-critic uses td-error: δ_t = r + γV(s') - V(s)
-    """
-
     advantages = []
     for r, v, v_next, done in zip(rewards, values, next_values, dones):
-        # td-error: δ = r + γV(s') - V(s)
         bootstrap = 0.0 if done else v_next.item()
         td_target = r + gamma * bootstrap
         td_error = td_target - v.item()
@@ -175,13 +189,47 @@ def compute_td_advantages(
     return torch.tensor(advantages, dtype=torch.float32)
 
 
+def compute_gae_advantages(
+    rewards: list[float],
+    values: list[torch.Tensor],
+    next_values: list[torch.Tensor],
+    dones: list[bool],
+    gamma: float,
+    gae_lambda: float,
+) -> torch.Tensor:
+    """Compute GAE (Generalized Advantage Estimation)"""
+    T = len(rewards)
+    advantages = torch.zeros(T, dtype=torch.float32)
+    gae = 0.0
+    for t in reversed(range(T)):
+        v = float(values[t].item())
+        v_next = 0.0 if dones[t] else float(next_values[t].item())
+        delta = float(rewards[t]) + gamma * v_next - v
+        gae = delta + gamma * gae_lambda * (1 - int(dones[t])) * gae
+        advantages[t] = float(gae)
+    return advantages
+
+
+def shaped_reward_cartpole(obs: np.ndarray, obs2: np.ndarray, r_env: float, done: bool) -> float:
+    """Reward shaping for CartPole: bonus for upright pole, penalty for termination"""
+    # CartPole obs: [cart_pos, cart_vel, pole_angle, pole_vel]
+    pole_angle = obs2[2]
+    
+    # Bonus for keeping pole upright (smaller angle = better)
+    angle_bonus = 0.1 * (1.0 - abs(pole_angle) / 0.2095)  # 0.2095 rad is threshold
+    
+    # Penalty for early termination (not reaching 500 steps)
+    termination_penalty = -5.0 if done else 0.0
+    
+    return r_env + angle_bonus + termination_penalty
+
+
 @torch.no_grad()
-def evaluate_policy(cfg: A2CConfig, actor: Actor, episodes: int = 10) -> float:
-    """evaluate policy using argmax action selection"""
+def evaluate_policy(cfg: TransferConfig, actor: Actor, episodes: int = 10) -> float:
+    """Evaluate policy using argmax action selection on target environment."""
     was_training = actor.training
     actor.eval()
-    env = gym.make(cfg.env_name)
-    api = "gymnasium"
+    env = gym.make(cfg.target_env)
 
     returns = []
     for i in range(episodes):
@@ -191,8 +239,9 @@ def evaluate_policy(cfg: A2CConfig, actor: Actor, episodes: int = 10) -> float:
         while not done:
             obs_t = torch.as_tensor(pad_observation(obs), dtype=torch.float32)
             logits = actor(obs_t)
-            action = int(torch.argmax(logits).item()) % env.action_space.n
-            obs, r, terminated, truncated, _ = step_env(env, api, action)
+            # CartPole has 2 actions, use only first 2 logits
+            action = int(torch.argmax(logits[:2]).item())
+            obs, r, terminated, truncated, _ = step_env(env, action)
             done = terminated or truncated
             ep_ret += r
         returns.append(ep_ret)
@@ -201,73 +250,81 @@ def evaluate_policy(cfg: A2CConfig, actor: Actor, episodes: int = 10) -> float:
         actor.train()
     return float(np.mean(returns))
 
-def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
-    """Train actor-critic agent and return results with timing statistics.
-    
-    Returns:
-        episode_returns: list of returns per episode
-        solved_ep: episode at which solve threshold was reached (-1 if not solved)
-        best_greedy: best greedy evaluation return
-        elapsed_time: total training time in seconds
-        num_iterations: total number of training iterations
-    """
+
+def train_transfer(cfg: TransferConfig) -> tuple[list[float], int, float, float, int]:
+    """Fine-tune pretrained actor on target environment."""
     start_time = time.time()
     set_seed(cfg.seed)
 
-    env = gym.make(cfg.env_name)
-    api =  "gymnasium"
+    # Initialize networks
+    actor = Actor(6, 3, cfg.hidden)
+    critic = Critic(6, cfg.hidden)
+    
+    # Load pretrained actor weights
+    pretrained_path = Path(cfg.pretrained_path)
+    if pretrained_path.exists():
+        print(f"Loading pretrained actor from {pretrained_path}")
+        actor.load_state_dict(torch.load(pretrained_path, weights_only=True))
+        
+        # Reinitialize output layer for new task
+        if cfg.reinit_output_layer:
+            print("Reinitializing output layer (fc3) for CartPole")
+            actor.fc3 = layer_init(nn.Linear(cfg.hidden, 3), std=0.01)
+        
+        # Freeze hidden layers to preserve learned features
+        if cfg.freeze_hidden_layers:
+            print("Freezing hidden layers (fc1, fc2) - only training output layer")
+            for param in actor.fc1.parameters():
+                param.requires_grad = False
+            for param in actor.fc2.parameters():
+                param.requires_grad = False
+    else:
+        print(f"WARNING: Pretrained model not found at {pretrained_path}")
+        print("Training from scratch...")
+    
+    # Evaluate pretrained model before fine-tuning
+    pretrained_eval = evaluate_policy(cfg, actor, episodes=cfg.eval_episodes)
+    print(f"Pretrained model evaluation on {cfg.target_env}: {pretrained_eval:.1f}")
+    
+    # Setup environment
+    env = gym.make(cfg.target_env)
     obs, _ = env.reset(seed=cfg.seed)
-
-    obs_dim = int(np.asarray(obs).shape[0])
     act_dim = int(env.action_space.n)
     
-    # Use fixed 6 input, 3 output for meta-learning compatibility
-    fixed_obs_dim = 6
-    fixed_act_dim = 3
+    print(f"\n=== Transfer Learning: {cfg.source_env} → {cfg.target_env} ===")
+    print(f"Target action space size: {act_dim}")
+    print(f"Fine-tuning LR: actor={cfg.lr_actor}, critic={cfg.lr_critic}")
     
-    print(f"Environment: {cfg.env_name}")
-    print(f"Original observation size: {obs_dim}")
-    print(f"Padded observation size (input): {fixed_obs_dim}")
-    print(f"Original action size: {act_dim}")
-    print(f"Network output size: {fixed_act_dim}")
-    print(f"Hidden layer size: {cfg.hidden}")
-
-    actor = Actor(fixed_obs_dim, fixed_act_dim, cfg.hidden)
-    critic = Critic(fixed_obs_dim, cfg.hidden)
-
-    # adam optimizer
+    # Optimizers with lower LR for fine-tuning
     opt_actor = torch.optim.Adam(actor.parameters(), lr=cfg.lr_actor)
     opt_critic = torch.optim.Adam(critic.parameters(), lr=cfg.lr_critic)
-
-    # learning rate schedulers
+    
     scheduler_actor = StepLR(opt_actor, step_size=cfg.lr_step_size, gamma=cfg.lr_gamma)
     scheduler_critic = StepLR(opt_critic, step_size=cfg.lr_step_size, gamma=cfg.lr_gamma)
 
     episode_returns = []
     avg100_returns = []
-    eval_returns = []  
+    eval_returns = [pretrained_eval]  # Include pretrained eval as episode 0
     solved_ep = -1
-    best_greedy = -1e9
-    best_actor_state = None
-    last_greedy = float("nan")
+    best_greedy = pretrained_eval
+    best_actor_state = deepcopy(actor.state_dict())
     total_iterations = 0
 
     for ep in range(cfg.max_episodes):
         obs, _ = env.reset(seed=cfg.seed + ep)
         done = False
         
-        states = []
-        actions = []
         log_probs = []
         entropies = []
         values = []
         next_values = []
         rewards = []
-        dones = [] 
+        dones = []
 
         while not done:
             obs_t = torch.as_tensor(pad_observation(obs), dtype=torch.float32)
-            # actor: sample action
+            
+            # Actor: sample action
             logits = actor(obs_t)
             dist = torch.distributions.Categorical(logits=logits)
             action_t = dist.sample()
@@ -275,21 +332,22 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
             log_prob = dist.log_prob(action_t)
             entropy = dist.entropy()
             
-            # critic: estimate value
+            # Critic: estimate value
             value = critic(obs_t)
             
-            # environment step
-            obs2, reward, terminated, truncated, _ = step_env(env, api, action)
+            # Environment step
+            obs2, reward, terminated, truncated, _ = step_env(env, action)
             done = terminated or truncated
             
-            # next state value
+            # Apply reward shaping if enabled
+            if cfg.use_reward_shaping:
+                reward = shaped_reward_cartpole(obs, obs2, reward, done)
+            
+            # Next state value
             with torch.no_grad():
                 obs2_t = torch.as_tensor(pad_observation(obs2), dtype=torch.float32)
                 next_value = critic(obs2_t)
             
-            # store transition
-            states.append(obs_t)
-            actions.append(action_t)
             log_probs.append(log_prob)
             entropies.append(entropy)
             values.append(value)
@@ -301,17 +359,20 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
 
         ep_ret = sum(rewards)
         episode_returns.append(ep_ret)
-        total_iterations += len(rewards)  # Count total training steps
+        total_iterations += len(rewards)
 
-        log_probs_t = torch.stack(log_probs) 
-        entropies_t = torch.stack(entropies) 
-        values_t = torch.stack(values)     
+        log_probs_t = torch.stack(log_probs)
+        entropies_t = torch.stack(entropies)
+        values_t = torch.stack(values)
 
-        advantages = compute_td_advantages(rewards, values, next_values, dones, cfg.gamma)
+        # Choose advantage computation method
+        if cfg.use_gae:
+            advantages = compute_gae_advantages(rewards, values, next_values, dones, cfg.gamma, cfg.gae_lambda)
+        else:
+            advantages = compute_td_advantages(rewards, values, next_values, dones, cfg.gamma)
         
         if cfg.normalize_advantages and len(advantages) > 1:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
 
         actor_loss = -(log_probs_t * advantages).mean()
         entropy_loss = -cfg.entropy_coef * entropies_t.mean()
@@ -346,11 +407,11 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
             param_group['lr'] = max(param_group['lr'], cfg.min_lr)
 
         avg100 = float(np.mean(episode_returns[-100:])) if len(episode_returns) >= 100 else float("nan")
-        avg100_returns.append(avg100) 
+        avg100_returns.append(avg100)
 
         if (ep + 1) % cfg.eval_every == 0:
             last_greedy = evaluate_policy(cfg, actor, episodes=cfg.eval_episodes)
-            eval_returns.append(last_greedy) 
+            eval_returns.append(last_greedy)
             if last_greedy > best_greedy:
                 best_greedy = last_greedy
                 best_actor_state = deepcopy(actor.state_dict())
@@ -374,85 +435,88 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
         actor.load_state_dict(best_actor_state)
     
     final_eval = evaluate_policy(cfg, actor, episodes=cfg.eval_episodes)
-    print(f"Final greedy eval ({cfg.eval_episodes} eps): {final_eval:.1f}")
-    print(f"\n--- Training Statistics ---")
+    print(f"\n--- Transfer Learning Results ---")
+    print(f"Pretrained eval (before fine-tuning): {pretrained_eval:.1f}")
+    print(f"Final eval (after fine-tuning): {final_eval:.1f}")
+    print(f"Best greedy return: {best_greedy:.1f}")
     print(f"Total episodes: {ep + 1}")
-    print(f"Total training iterations: {total_iterations}")
     print(f"Elapsed time: {elapsed_time:.2f} seconds")
     print(f"Solved at episode: {solved_ep if solved_ep != -1 else 'Not solved'}")
-    print(f"Best greedy return: {best_greedy:.2f}")
     
     plot_learning_curves(
         train_returns=episode_returns,
         avg100_returns=avg100_returns,
-        eval_returns=eval_returns,
+        eval_returns=eval_returns[1:],  # Exclude pretrained eval
         eval_every=cfg.eval_every,
-        out_path="plots/acrobot_actor_critic.png",
-        ma_window=50,
-        title=f"Actor-Critic (TD-based) - {cfg.env_name}",
+        out_path="plots/transfer_acrobot_to_cartpole.png",
+        title=f"Transfer Learning: {cfg.source_env} → {cfg.target_env}",
     )
     
+    # Save results
     results_dir = Path("results")
     results_dir.mkdir(parents=True, exist_ok=True)
     np.savez(
-        results_dir / "acrobot_actor_critic.npz",
+        results_dir / "transfer_acrobot_to_cartpole.npz",
         train_returns=np.array(episode_returns),
         avg100_returns=np.array(avg100_returns),
         eval_returns=np.array(eval_returns),
         eval_every=cfg.eval_every,
+        pretrained_eval=pretrained_eval,
         solved_ep=solved_ep if solved_ep != -1 else -1,
         best_greedy=best_greedy,
         elapsed_time=elapsed_time,
         total_iterations=total_iterations,
     )
     
-    # Save model for transfer learning (Section 2)
+    # Save fine-tuned model
     models_dir = Path("models")
     models_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(actor.state_dict(), models_dir / "acrobot_actor.pt")
-    torch.save(critic.state_dict(), models_dir / "acrobot_critic.pt")
-    print(f"Saved models to {models_dir}/")
+    torch.save(actor.state_dict(), models_dir / "transfer_acrobot_to_cartpole_actor.pt")
     
     return episode_returns, solved_ep, best_greedy, elapsed_time, total_iterations
 
 
 def main():
-    cfg = A2CConfig(
-        env_name="Acrobot-v1",
-        gamma=0.99,
+    cfg = TransferConfig(
+        source_env="Acrobot-v1",
+        target_env="CartPole-v1",
+        pretrained_path="models/acrobot_actor.pt",
         
-        lr_actor=1e-3,
-        lr_critic=5e-3,
+        gamma=0.99,
+        lr_actor=1e-3,   # Optimal LR for transfer
+        lr_critic=1e-3,
+        hidden=256,
+        
         lr_step_size=100,
         lr_gamma=0.95,
-        min_lr=1e-4,
-        
-        hidden=256,
+        min_lr=1e-5,
         
         entropy_coef=0.05,
         value_loss_coef=0.25,
-        max_grad_norm=1.0,
+        max_grad_norm=0.5,
         normalize_advantages=True,
         
-        max_episodes=2000,
-        seed=123,                  
-        print_every=10,
+        # Test options
+        use_gae=True,           # Option 3: Both
+        gae_lambda=0.95,
+        use_reward_shaping=True,  # Option 3: Both
+        
+        freeze_hidden_layers=False,  # Train all layers
+        reinit_output_layer=False,   # Keep pretrained init
+        
+        max_episodes=1000,
+        seed=42,
         eval_every=25,
         eval_episodes=10,
-        solve_score=-100.0,  # Acrobot: solved when avg return >= -100
+        solve_score=475.0,
     )
-    print("\n=== Hyperparameters ===")
-    print(f"gamma: {cfg.gamma}")
-    print(f"lr_actor: {cfg.lr_actor}")
-    print(f"lr_critic: {cfg.lr_critic}")
-    print(f"entropy_coef: {cfg.entropy_coef}")
-    print(f"value_loss_coef: {cfg.value_loss_coef}")
-    print(f"max_grad_norm: {cfg.max_grad_norm}")
-    print(f"max_episodes: {cfg.max_episodes}")
-    print(f"solve_score: {cfg.solve_score}")
-    print("=======================\n")
-    returns, solved_ep, best_greedy, elapsed_time, total_iterations = train_a2c(cfg)
-    print(f"Done. episodes={len(returns)}, solved_ep={solved_ep}, best_greedy={best_greedy:.1f}")
+    
+    print("\n" + "="*60)
+    print("Section 2a: Transfer Learning - Acrobot → CartPole")
+    print("="*60)
+    
+    returns, solved_ep, best_greedy, elapsed_time, total_iterations = train_transfer(cfg)
+    print(f"\nDone. episodes={len(returns)}, solved_ep={solved_ep}, best_greedy={best_greedy:.1f}")
     print(f"Elapsed time: {elapsed_time:.2f}s, Total iterations: {total_iterations}")
 
 
