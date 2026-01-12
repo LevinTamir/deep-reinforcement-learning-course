@@ -651,10 +651,10 @@ def main():
         
         # Training
         gamma=0.985,
-        lr_actor=2e-5,      # Much smaller (reference: 0.00002)
-        lr_critic=1e-3,     # Larger (reference: 0.001) - bigger critic:actor ratio
-        lr_step_size=60,    # Decay every 60 episodes (reference pattern)
-        lr_gamma=0.7,       # Multiply by 0.7 each time (reference)
+        lr_actor=1e-5,      # Further reduced for ~100 episode convergence
+        lr_critic=5e-4,     # Further reduced for ~100 episode convergence
+        lr_step_size=60,    # Decay every 60 episodes
+        lr_gamma=0.7,       # Multiply by 0.7 each time
         min_lr=1e-6,
         
         entropy_coef=0.01,
