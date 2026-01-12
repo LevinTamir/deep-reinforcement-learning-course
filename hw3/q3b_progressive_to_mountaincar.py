@@ -292,14 +292,20 @@ def compute_td_advantages(
 
 
 def shaped_reward_energy(obs: np.ndarray, obs2: np.ndarray, r_env: float) -> float:
-    """Energy-based reward shaping for MountainCar (learning only)."""
+    """
+    Energy-based reward shaping for MountainCar (learning only).
+    
+    MATCHES Q1 MOUNTAINCAR: Uses the same energy bonus coefficients and scaling
+    to ensure consistent learning dynamics for transfer learning alignment.
+    """
     height_old = np.sin(3 * obs[0])
     height_new = np.sin(3 * obs2[0])
 
     kinetic_old = 0.5 * obs[1] ** 2
     kinetic_new = 0.5 * obs2[1] ** 2
 
-    energy_bonus = 5.0 * ((height_new + 50 * kinetic_new) - (height_old + 50 * kinetic_old))
+    # Q1 MountainCar coefficient: 100.0
+    energy_bonus = 100.0 * ((height_new + 50 * kinetic_new) - (height_old + 50 * kinetic_old))
 
     if obs2[0] >= 0.45:
         energy_bonus += 100.0
@@ -645,11 +651,11 @@ def main():
         
         # Training
         gamma=0.985,
-        lr_actor=1e-4,
-        lr_critic=5e-4,
-        lr_step_size=100,
-        lr_gamma=0.95,
-        min_lr=1e-5,
+        lr_actor=2e-5,      # Much smaller (reference: 0.00002)
+        lr_critic=1e-3,     # Larger (reference: 0.001) - bigger critic:actor ratio
+        lr_step_size=60,    # Decay every 60 episodes (reference pattern)
+        lr_gamma=0.7,       # Multiply by 0.7 each time (reference)
+        min_lr=1e-6,
         
         entropy_coef=0.01,
         value_loss_coef=0.5,
