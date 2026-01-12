@@ -299,7 +299,7 @@ def shaped_reward_energy(obs: np.ndarray, obs2: np.ndarray, r_env: float) -> flo
     kinetic_old = 0.5 * obs[1] ** 2
     kinetic_new = 0.5 * obs2[1] ** 2
 
-    energy_bonus = 100.0 * ((height_new + 50 * kinetic_new) - (height_old + 50 * kinetic_old))
+    energy_bonus = 5.0 * ((height_new + 50 * kinetic_new) - (height_old + 50 * kinetic_old))
 
     if obs2[0] >= 0.45:
         energy_bonus += 100.0

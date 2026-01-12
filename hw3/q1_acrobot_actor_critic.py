@@ -389,7 +389,7 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
         eval_every=cfg.eval_every,
         out_path="plots/acrobot_actor_critic.png",
         ma_window=50,
-        title=f"Actor-Critic (TD-based) - {cfg.env_name}",
+        title=f"Actor-Critic - {cfg.env_name}",
     )
     
     results_dir = Path("results")

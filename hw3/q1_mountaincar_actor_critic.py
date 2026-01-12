@@ -43,7 +43,7 @@ class A2CConfig:
     seed: int = 123
 
     print_every: int = 10
-    eval_every: int = 10
+    eval_every: int = 25
     eval_episodes: int = 10
     solve_score: float = 90.0  # greedy-eval threshold (TRUE env return)
 
@@ -515,7 +515,7 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
         eval_every=cfg.eval_every,
         out_path="plots/mountaincarcontinuous_actor_critic.png",
         ma_window=50,
-        title=f"Actor-Critic (TD-based) - {cfg.env_name}",
+        title=f"Actor-Critic - {cfg.env_name}",
     )
 
     results_dir = Path("results")
@@ -532,6 +532,13 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
         total_iterations=total_iterations,
         used_reward_shaping=cfg.use_reward_shaping,
     )
+
+    # Save model for transfer learning (Section 2)
+    models_dir = Path("models")
+    models_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(actor.state_dict(), models_dir / "mountaincar_actor.pt")
+    torch.save(critic.state_dict(), models_dir / "mountaincar_critic.pt")
+    print(f"Saved models to {models_dir}/")
 
     return episode_returns, solved_ep, best_greedy, elapsed_time, total_iterations
 
@@ -557,7 +564,7 @@ def main():
         max_episodes=2000,
         seed=123,
         print_every=10,
-        eval_every=10,
+        eval_every=25,
         eval_episodes=10,
         solve_score=90.0,
 
@@ -578,7 +585,7 @@ def main():
     print(f"max_grad_norm: {cfg.max_grad_norm}")
     print(f"max_episodes: {cfg.max_episodes}")
     print(f"solve_score: {cfg.solve_score}")
-    print("=======================")
+    print("=======================\n")
     returns, solved_ep, best_greedy, elapsed_time, total_iterations = train_a2c(cfg)
     print(f"Done. episodes={len(returns)}, solved_ep={solved_ep}, best_greedy={best_greedy:.1f}")
     print(f"Elapsed time: {elapsed_time:.2f}s, Total iterations: {total_iterations}")
