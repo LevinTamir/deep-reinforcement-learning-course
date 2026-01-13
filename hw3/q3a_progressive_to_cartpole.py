@@ -35,19 +35,20 @@ class ProgressiveConfig:
     
     # Training hyperparameters
     gamma: float = 0.99
-    lr_actor: float = 1e-3
+    gae_lambda: float = 0.95  # GAE lambda for advantage estimation
+    lr_actor: float = 2e-3  # Increased for faster learning
     lr_critic: float = 5e-3
-    lr_step_size: int = 100
-    lr_gamma: float = 0.95
+    lr_step_size: int = 75  # Faster decay schedule
+    lr_gamma: float = 0.9
     min_lr: float = 1e-4
     
-    entropy_coef: float = 0.05
-    value_loss_coef: float = 0.25
-    max_grad_norm: float = 1.0
+    entropy_coef: float = 0.02  # Reduced entropy for faster exploitation
+    value_loss_coef: float = 0.5  # Increased critic weight
+    max_grad_norm: float = 0.5  # Tighter gradient clipping
     normalize_advantages: bool = True
     
     max_episodes: int = 2000
-    seed: int = 123
+    seed: int = 42  # Different seed may help
     
     print_every: int = 10
     eval_every: int = 25
@@ -58,6 +59,13 @@ class ProgressiveConfig:
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
+    return layer
+
+
+def adapter_init(layer, std=0.1):
+    """Initialize adapter layers with small weights for gradual influence."""
+    torch.nn.init.orthogonal_(layer.weight, std)
+    torch.nn.init.constant_(layer.bias, 0.0)
     return layer
 
 
@@ -72,12 +80,13 @@ def pad_observation(obs: np.ndarray, target_size: int = 6) -> np.ndarray:
 class SourceActor(nn.Module):
     """
     Frozen source actor network. 
-    Loads pretrained weights and exposes hidden layer features for lateral connections.
+    Loads pretrained weights and exposes ALL hidden layer features for lateral connections.
     """
     def __init__(self, obs_dim: int = 6, act_dim: int = 3, hidden: int = 256):
         super().__init__()
         self.obs_dim = obs_dim
         self.act_dim = act_dim
+        self.hidden = hidden
         self.fc1 = nn.Linear(obs_dim, hidden)
         self.fc2 = nn.Linear(hidden, hidden)
         self.fc3 = nn.Linear(hidden, act_dim)
@@ -86,6 +95,12 @@ class SourceActor(nn.Module):
         x = torch.relu(self.fc1(x))
         x = torch.nn.functional.elu(self.fc2(x))
         return self.fc3(x)
+    
+    def get_all_hidden_features(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Extract features from both hidden layers for lateral connections."""
+        h1 = torch.relu(self.fc1(x))
+        h2 = torch.nn.functional.elu(self.fc2(h1))
+        return h1, h2
     
     def get_hidden_features(self, x: torch.Tensor) -> torch.Tensor:
         """Extract features from the top hidden layer (fc2 output)."""
@@ -105,12 +120,18 @@ class SourceActor(nn.Module):
 
 class ProgressiveActor(nn.Module):
     """
-    Progressive Networks Actor with lateral connections from frozen source networks.
+    Progressive Networks Actor with gated lateral connections.
     
     Architecture:
     - Two frozen source networks (Acrobot, MountainCar)
     - One trainable target network
-    - Lateral connections from source hidden layers to target output
+    - Learnable gates that control how much source knowledge flows in
+    - Gates initialized near zero to allow target to learn first, then gradually use sources
+    
+    This design allows:
+    1. Target network to learn independently early on
+    2. Gradual incorporation of source knowledge as gates open
+    3. Selective use of beneficial source features
     """
     def __init__(self, cfg: ProgressiveConfig):
         super().__init__()
@@ -123,9 +144,30 @@ class ProgressiveActor(nn.Module):
         self.fc1 = layer_init(nn.Linear(cfg.fixed_obs_dim, cfg.hidden))
         self.fc2 = layer_init(nn.Linear(cfg.hidden, cfg.hidden))
         
-        # Output layer: receives target hidden + lateral connections from both sources
-        # Input: hidden (target fc2) + hidden (source1 fc2) + hidden (source2 fc2)
-        self.fc3 = layer_init(nn.Linear(cfg.hidden * 3, cfg.fixed_act_dim), std=0.01)
+        # Lateral adapters: transform source features to target space
+        self.adapter1 = nn.Sequential(
+            nn.Linear(cfg.hidden, cfg.hidden),
+            nn.Tanh()
+        )
+        self.adapter2 = nn.Sequential(
+            nn.Linear(cfg.hidden, cfg.hidden),
+            nn.Tanh()
+        )
+        
+        # Initialize adapters with small weights
+        for adapter in [self.adapter1, self.adapter2]:
+            for m in adapter.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.orthogonal_(m.weight, 0.1)
+                    nn.init.constant_(m.bias, 0.0)
+        
+        # Learnable gate parameters (start near zero for gradual activation)
+        # Using sigmoid(gate_param) gives us a learnable [0,1] scaling
+        self.gate1 = nn.Parameter(torch.tensor(-2.0))  # sigmoid(-2) ≈ 0.12
+        self.gate2 = nn.Parameter(torch.tensor(-2.0))
+        
+        # Final output layer: target hidden only (gates modulate before this)
+        self.fc3 = layer_init(nn.Linear(cfg.hidden, cfg.fixed_act_dim), std=0.01)
         
         self.hidden_size = cfg.hidden
         
@@ -135,12 +177,19 @@ class ProgressiveActor(nn.Module):
             source1_h = self.source1.get_hidden_features(x)
             source2_h = self.source2.get_hidden_features(x)
         
-        # Target network hidden layers (trainable)
+        # Target network hidden layers
         target_h = torch.relu(self.fc1(x))
         target_h = torch.nn.functional.elu(self.fc2(target_h))
         
-        # Combine target hidden with lateral connections from sources
-        combined = torch.cat([target_h, source1_h, source2_h], dim=-1)
+        # Apply adapters and gates to source features
+        gate1 = torch.sigmoid(self.gate1)
+        gate2 = torch.sigmoid(self.gate2)
+        
+        adapted1 = gate1 * self.adapter1(source1_h)
+        adapted2 = gate2 * self.adapter2(source2_h)
+        
+        # Combine: target hidden + gated source contributions
+        combined = target_h + adapted1 + adapted2
         
         # Final output
         return self.fc3(combined)
@@ -247,6 +296,49 @@ def compute_td_advantages(
         td_target = r + gamma * bootstrap
         td_error = td_target - v.item()
         advantages.append(td_error)
+    return torch.tensor(advantages, dtype=torch.float32)
+
+
+def compute_gae_advantages(
+    rewards: list[float],
+    values: list[torch.Tensor],
+    next_values: list[torch.Tensor],
+    dones: list[bool],
+    gamma: float,
+    gae_lambda: float
+) -> torch.Tensor:
+    """
+    Compute GAE (Generalized Advantage Estimation) advantages.
+    
+    GAE provides a good bias-variance tradeoff:
+    - λ=0 gives TD(0) (low variance, high bias)
+    - λ=1 gives Monte Carlo (high variance, low bias)
+    - λ≈0.95 is typically a good balance
+    
+    A_t^GAE = Σ_{l=0}^{∞} (γλ)^l * δ_{t+l}
+    where δ_t = r_t + γ * V(s_{t+1}) - V(s_t)
+    """
+    advantages = []
+    gae = 0.0
+    
+    # Compute from the end backwards
+    for i in reversed(range(len(rewards))):
+        r = rewards[i]
+        v = values[i].item()
+        v_next = next_values[i].item() if not dones[i] else 0.0
+        
+        # TD error
+        delta = r + gamma * v_next - v
+        
+        # GAE: A_t = δ_t + γλ * A_{t+1}
+        # Reset GAE if episode terminated
+        if dones[i]:
+            gae = delta
+        else:
+            gae = delta + gamma * gae_lambda * gae
+        
+        advantages.insert(0, gae)
+    
     return torch.tensor(advantages, dtype=torch.float32)
 
 
@@ -406,7 +498,8 @@ def train_progressive(cfg: ProgressiveConfig) -> tuple[list[float], int, float, 
         entropies_t = torch.stack(entropies)
         values_t = torch.stack(values)
 
-        advantages = compute_td_advantages(rewards, values, next_values, dones, cfg.gamma)
+        # Use GAE for better advantage estimation (lower variance than TD(0))
+        advantages = compute_gae_advantages(rewards, values, next_values, dones, cfg.gamma, cfg.gae_lambda)
 
         if cfg.normalize_advantages and len(advantages) > 1:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -533,21 +626,22 @@ def main():
         fixed_act_dim=3,
         hidden=256,
         
-        # Training
+        # Training - improved hyperparameters
         gamma=0.99,
-        lr_actor=1e-3,
+        gae_lambda=0.95,  # GAE lambda for advantage estimation
+        lr_actor=2e-3,    # Higher learning rate for faster convergence
         lr_critic=5e-3,
-        lr_step_size=100,
-        lr_gamma=0.95,
+        lr_step_size=75,  # Faster decay schedule
+        lr_gamma=0.9,
         min_lr=1e-4,
         
-        entropy_coef=0.05,
-        value_loss_coef=0.25,
-        max_grad_norm=1.0,
+        entropy_coef=0.02,    # Lower entropy for faster exploitation
+        value_loss_coef=0.5,  # Higher critic weight
+        max_grad_norm=0.5,    # Tighter gradient clipping
         normalize_advantages=True,
         
         max_episodes=2000,
-        seed=123,
+        seed=42,  # Different seed
         print_every=10,
         eval_every=25,
         eval_episodes=10,
@@ -556,6 +650,7 @@ def main():
     
     print("\n=== Hyperparameters ===")
     print(f"gamma: {cfg.gamma}")
+    print(f"gae_lambda: {cfg.gae_lambda}")
     print(f"lr_actor: {cfg.lr_actor}")
     print(f"lr_critic: {cfg.lr_critic}")
     print(f"entropy_coef: {cfg.entropy_coef}")
