@@ -1,7 +1,7 @@
-# ============================================================
-#  Section 3b – Progressive Networks Transfer Learning
-#  Task: {CartPole, Acrobot} → MountainCarContinuous (continuous target)
-# ============================================================
+# ============================================
+# Section 3b – Progressive Networks Transfer Learning
+# Task: {CartPole, Acrobot} → MountainCarContinuous
+# ============================================
 
 from dataclasses import dataclass
 from copy import deepcopy
@@ -602,7 +602,7 @@ def train_progressive(cfg: ProgressiveConfig) -> tuple[list[float], int, float, 
         avg100_returns=avg100_returns,
         eval_returns=eval_returns,
         eval_every=cfg.eval_every,
-        out_path="plots/progressive_to_mountaincar.png",
+        out_path="plots/q3b_progressive_to_mountaincar.png",
         ma_window=50,
         title=f"Progressive Networks ({cfg.source1_name}, {cfg.source2_name}) → MountainCar",
     )

@@ -1,7 +1,7 @@
-# ============================================================
-#  Section 2a – Fine-tuning Pretrained Networks
-#  Task: Acrobot → CartPole (discrete → discrete)
-# ============================================================
+# ============================================
+# Section 2a – Fine-tuning Pretrained Networks
+# Task: Acrobot → CartPole (discrete → discrete)
+# ============================================
 
 from dataclasses import dataclass
 from copy import deepcopy
@@ -116,7 +116,7 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
 
 
-def step_env(env, action: int):
+def step_env(env, api: str, action: int):
     obs2, reward, terminated, truncated, info = env.step(action)
     return obs2, float(reward), bool(terminated), bool(truncated), info
 
@@ -180,6 +180,13 @@ def compute_td_advantages(
     dones: list[bool],
     gamma: float
 ) -> torch.Tensor:
+    """
+    compute TD(0) advantages: δ_t = r_t + γ * V(s_{t+1}) * (1 - done) - V(s_t)
+    
+    the difference from REINFORCE with Baseline:
+    - reinforce uses monte-carlo returns: A_t = G_t - V(s_t)
+    - actor-critic uses td-error: δ_t = r + γV(s') - V(s)
+    """
     advantages = []
     for r, v, v_next, done in zip(rewards, values, next_values, dones):
         bootstrap = 0.0 if done else v_next.item()
@@ -241,7 +248,7 @@ def evaluate_policy(cfg: TransferConfig, actor: Actor, episodes: int = 10) -> fl
             logits = actor(obs_t)
             # CartPole has 2 actions, use only first 2 logits
             action = int(torch.argmax(logits[:2]).item())
-            obs, r, terminated, truncated, _ = step_env(env, action)
+            obs, r, terminated, truncated, _ = step_env(env, "gymnasium", action)
             done = terminated or truncated
             ep_ret += r
         returns.append(ep_ret)
@@ -336,7 +343,7 @@ def train_transfer(cfg: TransferConfig) -> tuple[list[float], int, float, float,
             value = critic(obs_t)
             
             # Environment step
-            obs2, reward, terminated, truncated, _ = step_env(env, action)
+            obs2, reward, terminated, truncated, _ = step_env(env, "gymnasium", action)
             done = terminated or truncated
             
             # Apply reward shaping if enabled
@@ -448,7 +455,7 @@ def train_transfer(cfg: TransferConfig) -> tuple[list[float], int, float, float,
         avg100_returns=avg100_returns,
         eval_returns=eval_returns[1:],  # Exclude pretrained eval
         eval_every=cfg.eval_every,
-        out_path="plots/transfer_acrobot_to_cartpole.png",
+        out_path="plots/q2a_transfer_acrobot_to_cartpole.png",
         title=f"Transfer Learning: {cfg.source_env} → {cfg.target_env}",
     )
     

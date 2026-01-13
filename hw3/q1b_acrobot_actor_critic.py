@@ -387,7 +387,7 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
         avg100_returns=avg100_returns,
         eval_returns=eval_returns,
         eval_every=cfg.eval_every,
-        out_path="plots/acrobot_actor_critic.png",
+        out_path="plots/q1b_acrobot_actor_critic.png",
         ma_window=50,
         title=f"Actor-Critic - {cfg.env_name}",
     )

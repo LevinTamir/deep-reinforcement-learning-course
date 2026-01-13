@@ -1,7 +1,7 @@
-# ============================================================
-#  Section 3a – Progressive Networks Transfer Learning
-#  Task: {Acrobot, MountainCar} → CartPole (discrete target)
-# ============================================================
+# ============================================
+# Section 3a – Progressive Networks Transfer Learning
+# Task: {Acrobot, MountainCar} → CartPole
+# ============================================
 
 from dataclasses import dataclass
 from copy import deepcopy
@@ -224,7 +224,7 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
 
 
-def step_env(env, action: int):
+def step_env(env, api: str, action: int):
     obs2, reward, terminated, truncated, info = env.step(action)
     return obs2, float(reward), bool(terminated), bool(truncated), info
 
@@ -361,7 +361,7 @@ def evaluate_policy(cfg: ProgressiveConfig, actor: ProgressiveActor, episodes: i
             obs_t = torch.as_tensor(pad_observation(obs), dtype=torch.float32)
             logits = actor(obs_t)
             action = int(torch.argmax(logits).item()) % act_dim
-            obs, r, terminated, truncated, _ = step_env(env, action)
+            obs, r, terminated, truncated, _ = step_env(env, "gymnasium", action)
             done = terminated or truncated
             ep_ret += r
         returns.append(ep_ret)
@@ -470,7 +470,7 @@ def train_progressive(cfg: ProgressiveConfig) -> tuple[list[float], int, float, 
             value = critic(obs_t)
 
             # Environment step
-            obs2, reward, terminated, truncated, _ = step_env(env, action)
+            obs2, reward, terminated, truncated, _ = step_env(env, "gymnasium", action)
             done = terminated or truncated
 
             # Next state value
@@ -580,7 +580,7 @@ def train_progressive(cfg: ProgressiveConfig) -> tuple[list[float], int, float, 
         avg100_returns=avg100_returns,
         eval_returns=eval_returns,
         eval_every=cfg.eval_every,
-        out_path="plots/progressive_to_cartpole.png",
+        out_path="plots/q3a_progressive_to_cartpole.png",
         ma_window=50,
         title=f"Progressive Networks ({cfg.source1_name}, {cfg.source2_name}) → CartPole",
     )

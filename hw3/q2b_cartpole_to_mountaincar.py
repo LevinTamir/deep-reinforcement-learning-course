@@ -1,7 +1,7 @@
-# ============================================================
-#  Section 2b – Fine-tuning Pretrained Networks
-#  Task: CartPole → MountainCarContinuous (discrete → continuous)
-# ============================================================
+# ============================================
+# Section 2b – Fine-tuning Pretrained Networks
+# Task: CartPole → MountainCarContinuous (discrete → continuous)
+# ============================================
 
 from dataclasses import dataclass
 from copy import deepcopy
@@ -54,7 +54,7 @@ class TransferConfig:
     
     # Evaluation
     print_every: int = 10
-    eval_every: int = 10
+    eval_every: int = 25
     eval_episodes: int = 10
     solve_score: float = 90.0  # MountainCarContinuous solve threshold
     
@@ -212,6 +212,13 @@ def compute_td_advantages(
     dones: list[bool],
     gamma: float,
 ) -> torch.Tensor:
+    """
+    compute TD(0) advantages: δ_t = r_t + γ * V(s_{t+1}) * (1 - done) - V(s_t)
+    
+    the difference from REINFORCE with Baseline:
+    - reinforce uses monte-carlo returns: A_t = G_t - V(s_t)
+    - actor-critic uses td-error: δ_t = r + γV(s') - V(s)
+    """
     advantages = []
     for r, v, v_next, done in zip(rewards, values, next_values, dones):
         bootstrap = 0.0 if done else v_next.item()
@@ -503,7 +510,7 @@ def train_transfer(cfg: TransferConfig) -> tuple[list[float], int, float, float,
         avg100_returns=avg100_returns,
         eval_returns=eval_returns[1:],
         eval_every=cfg.eval_every,
-        out_path="plots/transfer_cartpole_to_mountaincar.png",
+        out_path="plots/q2b_transfer_cartpole_to_mountaincar.png",
         title=f"Transfer Learning: {cfg.source_env} → {cfg.target_env}",
     )
 
@@ -558,7 +565,7 @@ def main():
         
         max_episodes=500,
         seed=123,
-        eval_every=10,
+        eval_every=25,
         eval_episodes=10,
         solve_score=90.0,
         
