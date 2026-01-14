@@ -1,14 +1,8 @@
-# ============================================
-# Section 2a – Fine-tuning Pretrained Networks
-# Task: Acrobot → CartPole (discrete → discrete)
-# ============================================
 
 from dataclasses import dataclass
 from copy import deepcopy
-from pathlib import Path
 import time
 
-import matplotlib.pyplot as plt
 import numpy as np
 import random
 import torch
@@ -16,53 +10,43 @@ import torch.nn as nn
 from torch.optim.lr_scheduler import StepLR
 import gymnasium as gym
 
-
+from plotting_utils import *
 @dataclass
 class TransferConfig:
-    # Source and target environments
     source_env: str = "Acrobot-v1"
     target_env: str = "CartPole-v1"
     
-    # Pretrained model path
     pretrained_path: str = "models/acrobot_actor.pt"
     
-    # Training hyperparameters (fine-tuning uses lower LR)
     gamma: float = 0.99
-    lr_actor: float = 1e-3   # LR for fine-tuning
+    lr_actor: float = 1e-3
     lr_critic: float = 1e-3
     hidden: int = 256
     
-    # LR decay
     lr_step_size: int = 100
     lr_gamma: float = 0.95
     min_lr: float = 1e-5
     
-    # Loss coefficients
     entropy_coef: float = 0.05
     value_loss_coef: float = 0.25
     max_grad_norm: float = 0.5
     normalize_advantages: bool = True
     
-    # GAE option
     use_gae: bool = False
     gae_lambda: float = 0.95
     
-    # Reward shaping option
     use_reward_shaping: bool = False
     
-    # Transfer learning options
-    freeze_hidden_layers: bool = True   # Freeze fc1, fc2 from pretrained
-    reinit_output_layer: bool = True    # Reinitialize fc3 for new task
+    freeze_hidden_layers: bool = True
+    reinit_output_layer: bool = True
     
-    # Training settings
-    max_episodes: int = 1000  # More episodes for convergence
+    max_episodes: int = 1000
     seed: int = 123
     
-    # Evaluation
     print_every: int = 10
     eval_every: int = 25
     eval_episodes: int = 10
-    solve_score: float = 475.0  # CartPole solve threshold
+    solve_score: float = 475.0
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -72,7 +56,6 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 def pad_observation(obs: np.ndarray, target_size: int = 6) -> np.ndarray:
-    """Pad observation to target size with zeros for meta-learning compatibility."""
     obs = np.asarray(obs, dtype=np.float32)
     if len(obs) < target_size:
         obs = np.pad(obs, (0, target_size - len(obs)), mode='constant', constant_values=0.0)
@@ -80,7 +63,6 @@ def pad_observation(obs: np.ndarray, target_size: int = 6) -> np.ndarray:
 
 
 class Actor(nn.Module):
-    """Policy network π(a|s; θ) - 6 input, 3 output for unified architecture"""
     def __init__(self, obs_dim: int = 6, act_dim: int = 3, hidden: int = 256):
         super().__init__()
         self.obs_dim = 6
@@ -96,7 +78,6 @@ class Actor(nn.Module):
 
 
 class Critic(nn.Module):
-    """Value function V(s; w) - 6 input for unified architecture"""
     def __init__(self, obs_dim: int = 6, hidden: int = 256):
         super().__init__()
         self.obs_dim = 6
@@ -108,12 +89,6 @@ class Critic(nn.Module):
         x = torch.relu(self.fc1(x))
         x = torch.nn.functional.elu(self.fc2(x))
         return self.fc3(x).squeeze(-1)
-
-
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
 
 
 def step_env(env, api: str, action: int):
@@ -128,51 +103,6 @@ def moving_average(x: list[float], window: int) -> np.ndarray:
     kernel = np.ones(window, dtype=np.float32) / window
     return np.convolve(x, kernel, mode="valid")
 
-
-def plot_learning_curves(
-    train_returns: list[float],
-    avg100_returns: list[float],
-    eval_returns: list[float],
-    eval_every: int,
-    out_path: str,
-    ma_window: int = 50,
-    title: str = "Transfer Learning Curve",
-) -> None:
-    out = Path(out_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-
-    episodes = np.arange(1, len(train_returns) + 1)
-    eval_episodes = np.arange(eval_every, eval_every * len(eval_returns) + 1, eval_every)
-
-    plt.figure(figsize=(12, 6))
-
-    plt.subplot(2, 1, 1)
-    plt.plot(episodes, train_returns, alpha=0.4, label="Reward per episode")
-    ma = moving_average(train_returns, ma_window)
-    if len(ma) > 1:
-        ma_x = np.arange(ma_window, ma_window + len(ma))
-        plt.plot(ma_x, ma, linewidth=2, label=f"Reward (MA{ma_window})")
-    plt.xlabel("Episode")
-    plt.ylabel("Reward")
-    plt.title(title)
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-
-    plt.subplot(2, 1, 2)
-    plt.plot(episodes, avg100_returns, linewidth=2, label="Avg reward (last 100 episodes)")
-    if len(eval_returns) > 0:
-        plt.plot(eval_episodes, eval_returns, marker="o", linewidth=1.5, label="Eval avg return")
-    plt.xlabel("Episode")
-    plt.ylabel("Reward")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-
-    plt.tight_layout()
-    plt.savefig(out, dpi=150)
-    plt.close()
-    print(f"Saved learning curves to {out_path}")
-
-
 def compute_td_advantages(
     rewards: list[float],
     values: list[torch.Tensor],
@@ -180,13 +110,7 @@ def compute_td_advantages(
     dones: list[bool],
     gamma: float
 ) -> torch.Tensor:
-    """
-    compute TD(0) advantages: δ_t = r_t + γ * V(s_{t+1}) * (1 - done) - V(s_t)
-    
-    the difference from REINFORCE with Baseline:
-    - reinforce uses monte-carlo returns: A_t = G_t - V(s_t)
-    - actor-critic uses td-error: δ_t = r + γV(s') - V(s)
-    """
+
     advantages = []
     for r, v, v_next, done in zip(rewards, values, next_values, dones):
         bootstrap = 0.0 if done else v_next.item()
@@ -204,7 +128,6 @@ def compute_gae_advantages(
     gamma: float,
     gae_lambda: float,
 ) -> torch.Tensor:
-    """Compute GAE (Generalized Advantage Estimation)"""
     T = len(rewards)
     advantages = torch.zeros(T, dtype=torch.float32)
     gae = 0.0
@@ -218,14 +141,11 @@ def compute_gae_advantages(
 
 
 def shaped_reward_cartpole(obs: np.ndarray, obs2: np.ndarray, r_env: float, done: bool) -> float:
-    """Reward shaping for CartPole: bonus for upright pole, penalty for termination"""
-    # CartPole obs: [cart_pos, cart_vel, pole_angle, pole_vel]
+
     pole_angle = obs2[2]
     
-    # Bonus for keeping pole upright (smaller angle = better)
-    angle_bonus = 0.1 * (1.0 - abs(pole_angle) / 0.2095)  # 0.2095 rad is threshold
+    angle_bonus = 0.1 * (1.0 - abs(pole_angle) / 0.2095)
     
-    # Penalty for early termination (not reaching 500 steps)
     termination_penalty = -5.0 if done else 0.0
     
     return r_env + angle_bonus + termination_penalty
@@ -233,7 +153,6 @@ def shaped_reward_cartpole(obs: np.ndarray, obs2: np.ndarray, r_env: float, done
 
 @torch.no_grad()
 def evaluate_policy(cfg: TransferConfig, actor: Actor, episodes: int = 10) -> float:
-    """Evaluate policy using argmax action selection on target environment."""
     was_training = actor.training
     actor.eval()
     env = gym.make(cfg.target_env)
@@ -246,7 +165,6 @@ def evaluate_policy(cfg: TransferConfig, actor: Actor, episodes: int = 10) -> fl
         while not done:
             obs_t = torch.as_tensor(pad_observation(obs), dtype=torch.float32)
             logits = actor(obs_t)
-            # CartPole has 2 actions, use only first 2 logits
             action = int(torch.argmax(logits[:2]).item())
             obs, r, terminated, truncated, _ = step_env(env, "gymnasium", action)
             done = terminated or truncated
@@ -259,50 +177,34 @@ def evaluate_policy(cfg: TransferConfig, actor: Actor, episodes: int = 10) -> fl
 
 
 def train_transfer(cfg: TransferConfig) -> tuple[list[float], int, float, float, int]:
-    """Fine-tune pretrained actor on target environment."""
     start_time = time.time()
-    set_seed(cfg.seed)
+    random.seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    torch.manual_seed(cfg.seed)
 
-    # Initialize networks
     actor = Actor(6, 3, cfg.hidden)
     critic = Critic(6, cfg.hidden)
     
-    # Load pretrained actor weights
     pretrained_path = Path(cfg.pretrained_path)
     if pretrained_path.exists():
-        print(f"Loading pretrained actor from {pretrained_path}")
         actor.load_state_dict(torch.load(pretrained_path, weights_only=True))
         
-        # Reinitialize output layer for new task
         if cfg.reinit_output_layer:
-            print("Reinitializing output layer (fc3) for CartPole")
             actor.fc3 = layer_init(nn.Linear(cfg.hidden, 3), std=0.01)
         
-        # Freeze hidden layers to preserve learned features
         if cfg.freeze_hidden_layers:
-            print("Freezing hidden layers (fc1, fc2) - only training output layer")
             for param in actor.fc1.parameters():
                 param.requires_grad = False
             for param in actor.fc2.parameters():
                 param.requires_grad = False
-    else:
-        print(f"WARNING: Pretrained model not found at {pretrained_path}")
-        print("Training from scratch...")
+
     
-    # Evaluate pretrained model before fine-tuning
     pretrained_eval = evaluate_policy(cfg, actor, episodes=cfg.eval_episodes)
-    print(f"Pretrained model evaluation on {cfg.target_env}: {pretrained_eval:.1f}")
-    
-    # Setup environment
+
     env = gym.make(cfg.target_env)
     obs, _ = env.reset(seed=cfg.seed)
     act_dim = int(env.action_space.n)
-    
-    print(f"\n=== Transfer Learning: {cfg.source_env} → {cfg.target_env} ===")
-    print(f"Target action space size: {act_dim}")
-    print(f"Fine-tuning LR: actor={cfg.lr_actor}, critic={cfg.lr_critic}")
-    
-    # Optimizers with lower LR for fine-tuning
+
     opt_actor = torch.optim.Adam(actor.parameters(), lr=cfg.lr_actor)
     opt_critic = torch.optim.Adam(critic.parameters(), lr=cfg.lr_critic)
     
@@ -311,7 +213,7 @@ def train_transfer(cfg: TransferConfig) -> tuple[list[float], int, float, float,
 
     episode_returns = []
     avg100_returns = []
-    eval_returns = [pretrained_eval]  # Include pretrained eval as episode 0
+    eval_returns = [pretrained_eval]
     solved_ep = -1
     best_greedy = pretrained_eval
     best_actor_state = deepcopy(actor.state_dict())
@@ -331,7 +233,6 @@ def train_transfer(cfg: TransferConfig) -> tuple[list[float], int, float, float,
         while not done:
             obs_t = torch.as_tensor(pad_observation(obs), dtype=torch.float32)
             
-            # Actor: sample action
             logits = actor(obs_t)
             dist = torch.distributions.Categorical(logits=logits)
             action_t = dist.sample()
@@ -339,18 +240,14 @@ def train_transfer(cfg: TransferConfig) -> tuple[list[float], int, float, float,
             log_prob = dist.log_prob(action_t)
             entropy = dist.entropy()
             
-            # Critic: estimate value
             value = critic(obs_t)
             
-            # Environment step
             obs2, reward, terminated, truncated, _ = step_env(env, "gymnasium", action)
             done = terminated or truncated
             
-            # Apply reward shaping if enabled
             if cfg.use_reward_shaping:
                 reward = shaped_reward_cartpole(obs, obs2, reward, done)
             
-            # Next state value
             with torch.no_grad():
                 obs2_t = torch.as_tensor(pad_observation(obs2), dtype=torch.float32)
                 next_value = critic(obs2_t)
@@ -372,7 +269,6 @@ def train_transfer(cfg: TransferConfig) -> tuple[list[float], int, float, float,
         entropies_t = torch.stack(entropies)
         values_t = torch.stack(values)
 
-        # Choose advantage computation method
         if cfg.use_gae:
             advantages = compute_gae_advantages(rewards, values, next_values, dones, cfg.gamma, cfg.gae_lambda)
         else:
@@ -441,25 +337,17 @@ def train_transfer(cfg: TransferConfig) -> tuple[list[float], int, float, float,
     if best_actor_state is not None:
         actor.load_state_dict(best_actor_state)
     
-    final_eval = evaluate_policy(cfg, actor, episodes=cfg.eval_episodes)
-    print(f"\n--- Transfer Learning Results ---")
-    print(f"Pretrained eval (before fine-tuning): {pretrained_eval:.1f}")
-    print(f"Final eval (after fine-tuning): {final_eval:.1f}")
-    print(f"Best greedy return: {best_greedy:.1f}")
-    print(f"Total episodes: {ep + 1}")
-    print(f"Elapsed time: {elapsed_time:.2f} seconds")
-    print(f"Solved at episode: {solved_ep if solved_ep != -1 else 'Not solved'}")
-    
+    evaluate_policy(cfg, actor, episodes=cfg.eval_episodes)
+
     plot_learning_curves(
         train_returns=episode_returns,
         avg100_returns=avg100_returns,
-        eval_returns=eval_returns[1:],  # Exclude pretrained eval
+        eval_returns=eval_returns[1:],
         eval_every=cfg.eval_every,
         out_path="plots/q2a_transfer_acrobot_to_cartpole.png",
         title=f"Transfer Learning: {cfg.source_env} → {cfg.target_env}",
     )
     
-    # Save results
     results_dir = Path("results")
     results_dir.mkdir(parents=True, exist_ok=True)
     np.savez(
@@ -475,7 +363,6 @@ def train_transfer(cfg: TransferConfig) -> tuple[list[float], int, float, float,
         total_iterations=total_iterations,
     )
     
-    # Save fine-tuned model
     models_dir = Path("models")
     models_dir.mkdir(parents=True, exist_ok=True)
     torch.save(actor.state_dict(), models_dir / "transfer_acrobot_to_cartpole_actor.pt")
@@ -490,7 +377,7 @@ def main():
         pretrained_path="models/acrobot_actor.pt",
         
         gamma=0.99,
-        lr_actor=1e-3,   # Optimal LR for transfer
+        lr_actor=1e-3,
         lr_critic=1e-3,
         hidden=256,
         
@@ -503,13 +390,12 @@ def main():
         max_grad_norm=0.5,
         normalize_advantages=True,
         
-        # Test options
-        use_gae=True,           # Option 3: Both
+        use_gae=True,
         gae_lambda=0.95,
-        use_reward_shaping=True,  # Option 3: Both
+        use_reward_shaping=True,
         
-        freeze_hidden_layers=False,  # Train all layers
-        reinit_output_layer=False,   # Keep pretrained init
+        freeze_hidden_layers=False,
+        reinit_output_layer=False,
         
         max_episodes=1000,
         seed=42,
@@ -517,14 +403,9 @@ def main():
         eval_episodes=10,
         solve_score=475.0,
     )
+
     
-    print("\n" + "="*60)
-    print("Section 2a: Transfer Learning - Acrobot → CartPole")
-    print("="*60)
-    
-    returns, solved_ep, best_greedy, elapsed_time, total_iterations = train_transfer(cfg)
-    print(f"\nDone. episodes={len(returns)}, solved_ep={solved_ep}, best_greedy={best_greedy:.1f}")
-    print(f"Elapsed time: {elapsed_time:.2f}s, Total iterations: {total_iterations}")
+    train_transfer(cfg)
 
 
 if __name__ == "__main__":

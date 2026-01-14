@@ -1,14 +1,9 @@
-# ============================================================
-#  Section 1 – Training Individual Networks (MountainCarContinuous-v0)
-# ============================================================
 
 from dataclasses import dataclass
 from copy import deepcopy
-from pathlib import Path
 import time
 import random
 
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
@@ -16,10 +11,7 @@ from torch.optim.lr_scheduler import StepLR
 import gymnasium as gym
 from sklearn.preprocessing import StandardScaler
 
-
-# -----------------------------
-# Config
-# -----------------------------
+from plotting_utils import *
 @dataclass
 class A2CConfig:
     env_name: str = "MountainCarContinuous-v0"
@@ -29,7 +21,6 @@ class A2CConfig:
     lr_critic: float = 5e-4
     hidden: int = 256
 
-    # Learning rate decay
     lr_step_size: int = 100
     lr_gamma: float = 0.95
     min_lr: float = 1e-5
@@ -45,34 +36,19 @@ class A2CConfig:
     print_every: int = 10
     eval_every: int = 25
     eval_episodes: int = 10
-    solve_score: float = 90.0  # greedy-eval threshold (TRUE env return)
+    solve_score: float = 90.0
 
-    # Fixed IO sizes (HW requirement)
     fixed_obs_dim: int = 6
     fixed_actor_out_dim: int = 3
 
-    # Gaussian policy stabilization
     log_std_min: float = -3.0
     log_std_max: float = 1.0
 
-    # Optional: per-step discount accumulator I_t (as in TF ref)
     use_I_weight: bool = True
 
-    # Reward shaping toggle (learning only)
     use_reward_shaping: bool = True
 
-
-# -----------------------------
-# Utilities
-# -----------------------------
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-
 def step_env(env, action: np.ndarray):
-    """Step environment and return standardized output."""
     obs2, reward, terminated, truncated, info = env.step(action)
     return obs2, float(reward), bool(terminated), bool(truncated), info
 
@@ -91,7 +67,6 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 def moving_average(x: list[float], window: int) -> np.ndarray:
-    """Simple moving average."""
     x = np.asarray(x, dtype=np.float32)
     if window <= 1 or len(x) < window:
         return x
@@ -99,70 +74,17 @@ def moving_average(x: list[float], window: int) -> np.ndarray:
     return np.convolve(x, kernel, mode="valid")
 
 
-def plot_learning_curves(
-    train_returns: list[float],
-    avg100_returns: list[float],
-    eval_returns: list[float],
-    eval_every: int,
-    out_path: str = "plots/mountaincarcontinuous_actor_critic.png",
-    ma_window: int = 50,
-    title: str = "Actor-Critic learning curve",
-) -> None:
-    out = Path(out_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-
-    episodes = np.arange(1, len(train_returns) + 1)
-    eval_episodes = np.arange(eval_every, eval_every * len(eval_returns) + 1, eval_every)
-
-    plt.figure(figsize=(12, 6))
-
-    plt.subplot(2, 1, 1)
-    plt.plot(episodes, train_returns, alpha=0.4, label="Reward per episode")
-    ma = moving_average(train_returns, ma_window)
-    if len(ma) > 1:
-        ma_x = np.arange(ma_window, ma_window + len(ma))
-        plt.plot(ma_x, ma, linewidth=2, label=f"Reward (MA{ma_window})")
-    plt.xlabel("Episode")
-    plt.ylabel("Reward")
-    plt.title(title)
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-
-    plt.subplot(2, 1, 2)
-    plt.plot(episodes, avg100_returns, linewidth=2, label="Avg reward (last 100 episodes)")
-    if len(eval_returns) > 0:
-        plt.plot(eval_episodes, eval_returns, marker="o", linewidth=1.5, label="Eval avg return")
-    plt.xlabel("Episode")
-    plt.ylabel("Reward")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-
-    plt.tight_layout()
-    plt.savefig(out, dpi=150)
-    plt.close()
-    print(f"Saved learning curves to {out_path}")
-
-
-# -----------------------------
-# Networks
-# -----------------------------
 class Actor(nn.Module):
-    """
-    Fixed output size = 3:
-      out[0] -> mu (mean)
-      out[1] -> log_std
-      out[2] -> dummy (unused)
-    """
+
     def __init__(self, obs_dim: int, out_dim: int, hidden: int):
         super().__init__()
         self.fc1 = layer_init(nn.Linear(obs_dim, hidden))
         self.fc2 = layer_init(nn.Linear(hidden, hidden))
         self.fc3 = layer_init(nn.Linear(hidden, out_dim), std=0.01)
 
-        # Mild bias to avoid "do nothing" optimum (keep small)
         with torch.no_grad():
-            self.fc3.bias[0].fill_(0.2)   # mu bias (small push)
-            self.fc3.bias[1].fill_(-0.5)  # log_std bias (moderate std)
+            self.fc3.bias[0].fill_(0.2)
+            self.fc3.bias[1].fill_(-0.5)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = torch.relu(self.fc1(x))
@@ -183,25 +105,16 @@ class Critic(nn.Module):
         return self.fc3(x).squeeze(-1)
 
 
-# -----------------------------
-# Policy helpers
-# -----------------------------
 def sample_action_and_logprob(cfg: A2CConfig, actor_out: torch.Tensor):
-    """
-    Stochastic policy for training:
-      - Sample a ~ Normal(mu, std)
-      - Use tanh(a) to bound into [-1, 1] (action actually sent to env)
-      - Use log_prob with tanh correction for consistency
-    """
+
     mu = actor_out[0]
     log_std = actor_out[1].clamp(cfg.log_std_min, cfg.log_std_max)
     std = torch.exp(log_std)
 
     dist = torch.distributions.Normal(mu, std)
-    pre_tanh = dist.rsample()                 # scalar
-    action = torch.tanh(pre_tanh)             # scalar in [-1, 1]
+    pre_tanh = dist.rsample()
+    action = torch.tanh(pre_tanh)
 
-    # log pi(a) with tanh correction: log p(u) - log(1 - tanh(u)^2)
     log_prob_u = dist.log_prob(pre_tanh)
     correction = torch.log(1.0 - action.pow(2) + 1e-6)
     log_prob = (log_prob_u - correction).squeeze()
@@ -212,10 +125,7 @@ def sample_action_and_logprob(cfg: A2CConfig, actor_out: torch.Tensor):
 
 @torch.no_grad()
 def evaluate_policy_greedy(cfg: A2CConfig, actor: Actor, scaler: StandardScaler, episodes: int) -> float:
-    """
-    Greedy evaluation on TRUE env reward:
-      a = tanh(mu)
-    """
+
     env = gym.make(cfg.env_name)
     returns = []
 
@@ -234,7 +144,7 @@ def evaluate_policy_greedy(cfg: A2CConfig, actor: Actor, scaler: StandardScaler,
 
             out = actor(obs_t)
             mu = out[0]
-            action = torch.tanh(mu)  # key change: consistent bounded mean action
+            action = torch.tanh(mu)
             action_np = action.cpu().numpy().astype(np.float32).reshape(1,)
 
             obs, r_env, terminated, truncated, _ = env.step(action_np)
@@ -256,13 +166,7 @@ def compute_td_advantages(
     dones: list[bool],
     gamma: float,
 ) -> torch.Tensor:
-    """
-    Compute TD(0) advantages: δ_t = r_t + γ * V(s_{t+1}) * (1 - done) - V(s_t)
-    
-    The difference from REINFORCE with Baseline:
-    - REINFORCE uses Monte-Carlo returns: A_t = G_t - V(s_t)
-    - Actor-Critic uses TD-error: δ_t = r + γV(s') - V(s)
-    """
+
     advantages = []
     for r, v, v_next, done in zip(rewards, values, next_values, dones):
         bootstrap = 0.0 if done else v_next.item()
@@ -273,9 +177,7 @@ def compute_td_advantages(
 
 
 def shaped_reward_energy(obs: np.ndarray, obs2: np.ndarray, r_env: float) -> float:
-    """
-    Energy-based shaping used ONLY for learning (targets/advantages), not for reporting.
-    """
+
     height_old = np.sin(3 * obs[0])
     height_new = np.sin(3 * obs2[0])
 
@@ -293,25 +195,17 @@ def shaped_reward_energy(obs: np.ndarray, obs2: np.ndarray, r_env: float) -> flo
 
 
 def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
-    """Train actor-critic agent and return results with timing statistics.
-    
-    Returns:
-        episode_returns: list of returns per episode
-        solved_ep: episode at which solve threshold was reached (-1 if not solved)
-        best_greedy: best greedy evaluation return
-        elapsed_time: total training time in seconds
-        num_iterations: total number of training iterations
-    """
+
     start_time = time.time()
-    set_seed(cfg.seed)
+    random.seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    torch.manual_seed(cfg.seed)
 
     env = gym.make(cfg.env_name)
     obs0, _ = env.reset(seed=cfg.seed)
 
-    # ---- Fit scaler on actual trajectories ----
-    print("Collecting initial trajectories for scaler...")
     scaler_obs = []
-    for _ in range(50):  # 50 random episodes
+    for _ in range(50):
         o, _ = env.reset()
         for _ in range(200):
             scaler_obs.append(o.copy())
@@ -321,25 +215,16 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
                 break
     scaler = StandardScaler()
     scaler.fit(np.array(scaler_obs, dtype=np.float32))
-    print(f"Scaler fitted on {len(scaler_obs)} observations")
 
     obs_dim = int(np.asarray(obs0).shape[0])
-    
-    print(f"Environment: {cfg.env_name}")
-    print(f"Original observation size: {obs_dim}")
-    print(f"Padded observation size (input): {cfg.fixed_obs_dim}")
-    print(f"Network output size (fixed): {cfg.fixed_actor_out_dim}")
-    print("Action bounds: [-1.0, 1.0]")
-    print(f"Hidden layer size: {cfg.hidden}")
+
 
     actor = Actor(cfg.fixed_obs_dim, cfg.fixed_actor_out_dim, cfg.hidden)
     critic = Critic(cfg.fixed_obs_dim, cfg.hidden)
 
-    # Adam optimizer
     opt_actor = torch.optim.Adam(actor.parameters(), lr=cfg.lr_actor)
     opt_critic = torch.optim.Adam(critic.parameters(), lr=cfg.lr_critic)
 
-    # Learning rate schedulers
     scheduler_actor = StepLR(opt_actor, step_size=cfg.lr_step_size, gamma=cfg.lr_gamma)
     scheduler_critic = StepLR(opt_critic, step_size=cfg.lr_step_size, gamma=cfg.lr_gamma)
 
@@ -362,44 +247,37 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
         entropies = []
         values = []
         next_values = []
-        rewards = []      # Learning rewards (shaped if enabled)
-        rewards_env = []  # TRUE env rewards (for reporting)
+        rewards = []
+        rewards_env = []
         dones = []
         I_weights = []
         I = 1.0
 
         while not done:
-            # Normalize + pad
             obs_norm = scaler.transform(np.asarray(obs, dtype=np.float32).reshape(1, -1)).flatten()
             obs_pad = pad_observation(obs_norm, cfg.fixed_obs_dim)
             obs_t = torch.as_tensor(obs_pad, dtype=torch.float32)
 
-            # Actor: sample action
             out = actor(obs_t)
             action_t, log_prob, entropy = sample_action_and_logprob(cfg, out)
             
-            # Critic: estimate value
             value = critic(obs_t)
 
-            # Environment step
             action_np = action_t.detach().cpu().numpy().astype(np.float32)
             obs2, r_env, terminated, truncated, _ = step_env(env, action_np)
             done = terminated or truncated
 
-            # Learning reward (optionally shaped)
             if cfg.use_reward_shaping:
                 r_learn = shaped_reward_energy(obs, obs2, r_env)
             else:
                 r_learn = r_env
 
-            # Next state value
             with torch.no_grad():
                 obs2_norm = scaler.transform(np.asarray(obs2, dtype=np.float32).reshape(1, -1)).flatten()
                 obs2_pad = pad_observation(obs2_norm, cfg.fixed_obs_dim)
                 obs2_t = torch.as_tensor(obs2_pad, dtype=torch.float32)
                 next_value = critic(obs2_t)
 
-            # Store transition
             states.append(obs_t)
             actions.append(action_t)
             log_probs.append(log_prob)
@@ -414,16 +292,14 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
             obs = obs2
             I *= cfg.gamma
 
-        ep_ret = sum(rewards_env)  # TRUE env return
+        ep_ret = sum(rewards_env)
         episode_returns.append(ep_ret)
         total_iterations += len(rewards)
 
-        # Convert to tensors
         log_probs_t = torch.stack(log_probs)
         entropies_t = torch.stack(entropies)
         values_t = torch.stack(values)
 
-        # Compute advantages using learning rewards
         advantages = compute_td_advantages(rewards, values, next_values, dones, cfg.gamma)
 
         if cfg.normalize_advantages and len(advantages) > 1:
@@ -434,11 +310,9 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
         else:
             I_t = torch.ones_like(advantages)
 
-        # Actor loss
         actor_loss = -(log_probs_t * advantages * I_t).mean()
         entropy_loss = -cfg.entropy_coef * entropies_t.mean()
 
-        # Critic loss (TD targets using learning rewards)
         td_targets = []
         for r, v_next, terminal in zip(rewards, next_values, dones):
             bootstrap = 0.0 if terminal else v_next.item()
@@ -471,7 +345,6 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
         avg100 = float(np.mean(episode_returns[-100:])) if len(episode_returns) >= 100 else float("nan")
         avg100_returns.append(avg100)
 
-        # Greedy evaluation on TRUE env return
         if (ep + 1) % cfg.eval_every == 0:
             last_greedy = evaluate_policy_greedy(cfg, actor, scaler, cfg.eval_episodes)
             eval_returns.append(last_greedy)
@@ -495,18 +368,10 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
     env.close()
     elapsed_time = time.time() - start_time
 
-    # Restore best actor
     if best_actor_state is not None:
         actor.load_state_dict(best_actor_state)
 
-    final_eval = evaluate_policy_greedy(cfg, actor, scaler, cfg.eval_episodes)
-    print(f"Final greedy eval ({cfg.eval_episodes} eps): {final_eval:.1f}")
-    print(f"\n--- Training Statistics ---")
-    print(f"Total episodes: {ep + 1}")
-    print(f"Total training iterations: {total_iterations}")
-    print(f"Elapsed time: {elapsed_time:.2f} seconds")
-    print(f"Solved at episode: {solved_ep if solved_ep != -1 else 'Not solved'}")
-    print(f"Best greedy return: {best_greedy:.2f}")
+    evaluate_policy_greedy(cfg, actor, scaler, cfg.eval_episodes)
 
     plot_learning_curves(
         train_returns=episode_returns,
@@ -533,7 +398,6 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
         used_reward_shaping=cfg.use_reward_shaping,
     )
 
-    # Save model for transfer learning (Section 2)
     models_dir = Path("models")
     models_dir.mkdir(parents=True, exist_ok=True)
     torch.save(actor.state_dict(), models_dir / "mountaincar_actor.pt")
@@ -573,7 +437,7 @@ def main():
         log_std_min=-3.0,
         log_std_max=1.0,
         use_I_weight=True,
-        use_reward_shaping=True,  # set False if you must not shape rewards for HW
+        use_reward_shaping=True,
     )
 
     print("\n=== Hyperparameters ===")
@@ -586,9 +450,7 @@ def main():
     print(f"max_episodes: {cfg.max_episodes}")
     print(f"solve_score: {cfg.solve_score}")
     print("=======================\n")
-    returns, solved_ep, best_greedy, elapsed_time, total_iterations = train_a2c(cfg)
-    print(f"Done. episodes={len(returns)}, solved_ep={solved_ep}, best_greedy={best_greedy:.1f}")
-    print(f"Elapsed time: {elapsed_time:.2f}s, Total iterations: {total_iterations}")
+    train_a2c(cfg)
 
 
 if __name__ == "__main__":

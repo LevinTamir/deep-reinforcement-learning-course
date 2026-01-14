@@ -1,15 +1,9 @@
-# ============================================
-# Section 3b – Progressive Networks Transfer Learning
-# Task: {CartPole, Acrobot} → MountainCarContinuous
-# ============================================
 
 from dataclasses import dataclass
 from copy import deepcopy
-from pathlib import Path
 import time
 import random
 
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
@@ -17,24 +11,20 @@ from torch.optim.lr_scheduler import StepLR
 import gymnasium as gym
 from sklearn.preprocessing import StandardScaler
 
-
+from plotting_utils import *
 @dataclass
 class ProgressiveConfig:
-    # Source models (frozen)
     source1_name: str = "CartPole"
     source2_name: str = "Acrobot"
     source1_path: str = "models/cartpole_actor.pt"
     source2_path: str = "models/acrobot_actor.pt"
     
-    # Target environment
     target_env: str = "MountainCarContinuous-v0"
     
-    # Architecture (must match source networks)
     fixed_obs_dim: int = 6
     fixed_act_dim: int = 3
     hidden: int = 256
     
-    # Training hyperparameters
     gamma: float = 0.985
     lr_actor: float = 1e-4
     lr_critic: float = 5e-4
@@ -55,14 +45,11 @@ class ProgressiveConfig:
     eval_episodes: int = 10
     solve_score: float = 90.0
     
-    # Gaussian policy settings
     log_std_min: float = -3.0
     log_std_max: float = 1.0
     
-    # Optional: per-step discount accumulator I_t
     use_I_weight: bool = True
     
-    # Reward shaping toggle (learning only)
     use_reward_shaping: bool = True
 
 
@@ -71,11 +58,6 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
 
 
 def pad_observation(obs: np.ndarray, target_size: int) -> np.ndarray:
@@ -86,69 +68,11 @@ def pad_observation(obs: np.ndarray, target_size: int) -> np.ndarray:
 
 
 def step_env(env, action: np.ndarray):
-    """Step environment and return standardized output."""
     obs2, reward, terminated, truncated, info = env.step(action)
     return obs2, float(reward), bool(terminated), bool(truncated), info
 
-
-def moving_average(x: list[float], window: int) -> np.ndarray:
-    """Simple moving average."""
-    x = np.asarray(x, dtype=np.float32)
-    if window <= 1 or len(x) < window:
-        return x
-    kernel = np.ones(window, dtype=np.float32) / window
-    return np.convolve(x, kernel, mode="valid")
-
-
-def plot_learning_curves(
-    train_returns: list[float],
-    avg100_returns: list[float],
-    eval_returns: list[float],
-    eval_every: int,
-    out_path: str,
-    ma_window: int = 50,
-    title: str = "Progressive Networks Learning Curve",
-) -> None:
-    out = Path(out_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-
-    episodes = np.arange(1, len(train_returns) + 1)
-    eval_episodes = np.arange(eval_every, eval_every * len(eval_returns) + 1, eval_every)
-
-    plt.figure(figsize=(12, 6))
-
-    plt.subplot(2, 1, 1)
-    plt.plot(episodes, train_returns, alpha=0.4, label="Reward per episode")
-    ma = moving_average(train_returns, ma_window)
-    if len(ma) > 1:
-        ma_x = np.arange(ma_window, ma_window + len(ma))
-        plt.plot(ma_x, ma, linewidth=2, label=f"Reward (MA{ma_window})")
-    plt.xlabel("Episode")
-    plt.ylabel("Reward")
-    plt.title(title)
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-
-    plt.subplot(2, 1, 2)
-    plt.plot(episodes, avg100_returns, linewidth=2, label="Avg reward (last 100 episodes)")
-    if len(eval_returns) > 0:
-        plt.plot(eval_episodes, eval_returns, marker="o", linewidth=1.5, label="Eval avg return")
-    plt.xlabel("Episode")
-    plt.ylabel("Reward")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-
-    plt.tight_layout()
-    plt.savefig(out, dpi=150)
-    plt.close()
-    print(f"Saved learning curves to {out_path}")
-
-
 class SourceActor(nn.Module):
-    """
-    Frozen source actor network. 
-    Loads pretrained weights and exposes hidden layer features for lateral connections.
-    """
+
     def __init__(self, obs_dim: int = 6, act_dim: int = 3, hidden: int = 256):
         super().__init__()
         self.obs_dim = obs_dim
@@ -163,82 +87,56 @@ class SourceActor(nn.Module):
         return self.fc3(x)
     
     def get_hidden_features(self, x: torch.Tensor) -> torch.Tensor:
-        """Extract features from the top hidden layer (fc2 output)."""
         x = torch.relu(self.fc1(x))
         x = torch.nn.functional.elu(self.fc2(x))
         return x
     
     def load_pretrained(self, path: str) -> None:
-        """Load pretrained weights and freeze all parameters."""
         state_dict = torch.load(path, map_location='cpu', weights_only=True)
         self.load_state_dict(state_dict)
-        # Freeze all parameters
         for param in self.parameters():
             param.requires_grad = False
         self.eval()
 
 
 class ProgressiveActor(nn.Module):
-    """
-    Progressive Networks Actor with lateral connections from frozen source networks.
-    For continuous actions (MountainCarContinuous).
-    
-    Architecture:
-    - Two frozen source networks (CartPole, Acrobot)
-    - One trainable target network
-    - Lateral connections from source hidden layers to target output
-    
-    Output: (mu, log_std, dummy) for Gaussian policy
-    """
+
     def __init__(self, cfg: ProgressiveConfig):
         super().__init__()
         
-        # Frozen source networks
         self.source1 = SourceActor(cfg.fixed_obs_dim, cfg.fixed_act_dim, cfg.hidden)
         self.source2 = SourceActor(cfg.fixed_obs_dim, cfg.fixed_act_dim, cfg.hidden)
         
-        # Trainable target network layers
         self.fc1 = layer_init(nn.Linear(cfg.fixed_obs_dim, cfg.hidden))
         self.fc2 = layer_init(nn.Linear(cfg.hidden, cfg.hidden))
         
-        # Output layer: receives target hidden + lateral connections from both sources
-        # Input: hidden (target fc2) + hidden (source1 fc2) + hidden (source2 fc2)
+
         self.fc3 = layer_init(nn.Linear(cfg.hidden * 3, cfg.fixed_act_dim), std=0.01)
         
-        # Mild bias to avoid "do nothing" optimum
         with torch.no_grad():
-            self.fc3.bias[0].fill_(0.2)   # mu bias (small push)
-            self.fc3.bias[1].fill_(-0.5)  # log_std bias (moderate std)
+            self.fc3.bias[0].fill_(0.2)
+            self.fc3.bias[1].fill_(-0.5)
         
         self.hidden_size = cfg.hidden
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Get frozen features from source networks
         with torch.no_grad():
             source1_h = self.source1.get_hidden_features(x)
             source2_h = self.source2.get_hidden_features(x)
         
-        # Target network hidden layers (trainable)
         target_h = torch.relu(self.fc1(x))
         target_h = torch.nn.functional.elu(self.fc2(target_h))
         
-        # Combine target hidden with lateral connections from sources
         combined = torch.cat([target_h, source1_h, source2_h], dim=-1)
         
-        # Final output
         return self.fc3(combined)
     
     def load_source_networks(self, source1_path: str, source2_path: str) -> None:
-        """Load pretrained weights for both source networks."""
-        print(f"Loading source 1 from: {source1_path}")
         self.source1.load_pretrained(source1_path)
-        print(f"Loading source 2 from: {source2_path}")
         self.source2.load_pretrained(source2_path)
-        print("Source networks loaded and frozen.")
 
 
 class Critic(nn.Module):
-    """Value function V(s; w)."""
     def __init__(self, obs_dim: int, hidden: int):
         super().__init__()
         self.fc1 = layer_init(nn.Linear(obs_dim, hidden))
@@ -252,11 +150,7 @@ class Critic(nn.Module):
 
 
 def sample_action_and_logprob(cfg: ProgressiveConfig, actor_out: torch.Tensor):
-    """
-    Stochastic policy for continuous actions:
-      - Sample a ~ Normal(mu, std)
-      - Use tanh(a) to bound into [-1, 1]
-    """
+
     mu = actor_out[0]
     log_std = actor_out[1].clamp(cfg.log_std_min, cfg.log_std_max)
     std = torch.exp(log_std)
@@ -265,7 +159,6 @@ def sample_action_and_logprob(cfg: ProgressiveConfig, actor_out: torch.Tensor):
     pre_tanh = dist.rsample()
     action = torch.tanh(pre_tanh)
 
-    # log pi(a) with tanh correction
     log_prob_u = dist.log_prob(pre_tanh)
     correction = torch.log(1.0 - action.pow(2) + 1e-6)
     log_prob = (log_prob_u - correction).squeeze()
@@ -281,7 +174,6 @@ def compute_td_advantages(
     dones: list[bool],
     gamma: float,
 ) -> torch.Tensor:
-    """Compute TD(0) advantages: δ_t = r_t + γ * V(s_{t+1}) * (1 - done) - V(s_t)"""
     advantages = []
     for r, v, v_next, done in zip(rewards, values, next_values, dones):
         bootstrap = 0.0 if done else v_next.item()
@@ -292,19 +184,13 @@ def compute_td_advantages(
 
 
 def shaped_reward_energy(obs: np.ndarray, obs2: np.ndarray, r_env: float) -> float:
-    """
-    Energy-based reward shaping for MountainCar (learning only).
-    
-    MATCHES Q1 MOUNTAINCAR: Uses the same energy bonus coefficients and scaling
-    to ensure consistent learning dynamics for transfer learning alignment.
-    """
+
     height_old = np.sin(3 * obs[0])
     height_new = np.sin(3 * obs2[0])
 
     kinetic_old = 0.5 * obs[1] ** 2
     kinetic_new = 0.5 * obs2[1] ** 2
 
-    # Q1 MountainCar coefficient: 100.0
     energy_bonus = 100.0 * ((height_new + 50 * kinetic_new) - (height_old + 50 * kinetic_old))
 
     if obs2[0] >= 0.45:
@@ -322,7 +208,6 @@ def evaluate_policy_greedy(
     scaler: StandardScaler, 
     episodes: int
 ) -> float:
-    """Greedy evaluation on TRUE env reward: a = tanh(mu)"""
     env = gym.make(cfg.target_env)
     returns = []
 
@@ -357,38 +242,15 @@ def evaluate_policy_greedy(
 
 
 def train_progressive(cfg: ProgressiveConfig) -> tuple[list[float], int, float, float, int]:
-    """
-    Train Progressive Networks actor on MountainCarContinuous.
-    
-    Returns:
-        episode_returns: list of returns per episode
-        solved_ep: episode at which solve threshold was reached (-1 if not solved)
-        best_greedy: best greedy evaluation return
-        elapsed_time: total training time in seconds
-        num_iterations: total number of training iterations
-    """
-    start_time = time.time()
-    set_seed(cfg.seed)
 
-    # Check if source models exist
-    source1_exists = Path(cfg.source1_path).exists()
-    source2_exists = Path(cfg.source2_path).exists()
-    
-    if not source1_exists:
-        print(f"ERROR: Source model not found: {cfg.source1_path}")
-        print(f"Please run q1_cartpole_actor_critic.py first to train the CartPole model.")
-        return [], -1, 0.0, 0.0, 0
-    
-    if not source2_exists:
-        print(f"ERROR: Source model not found: {cfg.source2_path}")
-        print(f"Please run q1_acrobot_actor_critic.py first to train the Acrobot model.")
-        return [], -1, 0.0, 0.0, 0
+    start_time = time.time()
+    random.seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    torch.manual_seed(cfg.seed)
 
     env = gym.make(cfg.target_env)
     obs0, _ = env.reset(seed=cfg.seed)
 
-    # Fit scaler on actual trajectories
-    print("Collecting initial trajectories for scaler...")
     scaler_obs = []
     for _ in range(50):
         o, _ = env.reset()
@@ -400,35 +262,18 @@ def train_progressive(cfg: ProgressiveConfig) -> tuple[list[float], int, float, 
                 break
     scaler = StandardScaler()
     scaler.fit(np.array(scaler_obs, dtype=np.float32))
-    print(f"Scaler fitted on {len(scaler_obs)} observations")
 
-    obs_dim = int(np.asarray(obs0).shape[0])
 
-    print(f"\n=== Progressive Networks Transfer Learning ===")
-    print(f"Source 1: {cfg.source1_name} ({cfg.source1_path})")
-    print(f"Source 2: {cfg.source2_name} ({cfg.source2_path})")
-    print(f"Target: {cfg.target_env}")
-    print(f"Original observation size: {obs_dim}")
-    print(f"Padded observation size (input): {cfg.fixed_obs_dim}")
-    print(f"Network output size (fixed): {cfg.fixed_act_dim}")
-    print("Action bounds: [-1.0, 1.0]")
-    print(f"Hidden layer size: {cfg.hidden}")
-
-    # Create Progressive Actor and load source networks
     actor = ProgressiveActor(cfg)
     actor.load_source_networks(cfg.source1_path, cfg.source2_path)
     
-    # Only target network parameters are trained (source networks are frozen)
     trainable_params = [p for p in actor.parameters() if p.requires_grad]
-    print(f"Trainable parameters: {sum(p.numel() for p in trainable_params)}")
-    
+
     critic = Critic(cfg.fixed_obs_dim, cfg.hidden)
 
-    # Adam optimizer (only for trainable parameters)
     opt_actor = torch.optim.Adam(trainable_params, lr=cfg.lr_actor)
     opt_critic = torch.optim.Adam(critic.parameters(), lr=cfg.lr_critic)
 
-    # Learning rate schedulers
     scheduler_actor = StepLR(opt_actor, step_size=cfg.lr_step_size, gamma=cfg.lr_gamma)
     scheduler_critic = StepLR(opt_critic, step_size=cfg.lr_step_size, gamma=cfg.lr_gamma)
 
@@ -451,44 +296,37 @@ def train_progressive(cfg: ProgressiveConfig) -> tuple[list[float], int, float, 
         entropies = []
         values = []
         next_values = []
-        rewards = []       # Learning rewards (shaped if enabled)
-        rewards_env = []   # TRUE env rewards (for reporting)
+        rewards = []
+        rewards_env = []
         dones = []
         I_weights = []
         I = 1.0
 
         while not done:
-            # Normalize + pad
             obs_norm = scaler.transform(np.asarray(obs, dtype=np.float32).reshape(1, -1)).flatten()
             obs_pad = pad_observation(obs_norm, cfg.fixed_obs_dim)
             obs_t = torch.as_tensor(obs_pad, dtype=torch.float32)
 
-            # Actor: sample action
             out = actor(obs_t)
             action_t, log_prob, entropy = sample_action_and_logprob(cfg, out)
 
-            # Critic: estimate value
             value = critic(obs_t)
 
-            # Environment step
             action_np = action_t.detach().cpu().numpy().astype(np.float32)
             obs2, r_env, terminated, truncated, _ = step_env(env, action_np)
             done = terminated or truncated
 
-            # Learning reward (optionally shaped)
             if cfg.use_reward_shaping:
                 r_learn = shaped_reward_energy(obs, obs2, r_env)
             else:
                 r_learn = r_env
 
-            # Next state value
             with torch.no_grad():
                 obs2_norm = scaler.transform(np.asarray(obs2, dtype=np.float32).reshape(1, -1)).flatten()
                 obs2_pad = pad_observation(obs2_norm, cfg.fixed_obs_dim)
                 obs2_t = torch.as_tensor(obs2_pad, dtype=torch.float32)
                 next_value = critic(obs2_t)
 
-            # Store transition
             states.append(obs_t)
             actions.append(action_t)
             log_probs.append(log_prob)
@@ -503,16 +341,14 @@ def train_progressive(cfg: ProgressiveConfig) -> tuple[list[float], int, float, 
             obs = obs2
             I *= cfg.gamma
 
-        ep_ret = sum(rewards_env)  # TRUE env return
+        ep_ret = sum(rewards_env)
         episode_returns.append(ep_ret)
         total_iterations += len(rewards)
 
-        # Convert to tensors
         log_probs_t = torch.stack(log_probs)
         entropies_t = torch.stack(entropies)
         values_t = torch.stack(values)
 
-        # Compute advantages using learning rewards
         advantages = compute_td_advantages(rewards, values, next_values, dones, cfg.gamma)
 
         if cfg.normalize_advantages and len(advantages) > 1:
@@ -523,11 +359,9 @@ def train_progressive(cfg: ProgressiveConfig) -> tuple[list[float], int, float, 
         else:
             I_t = torch.ones_like(advantages)
 
-        # Actor loss
         actor_loss = -(log_probs_t * advantages * I_t).mean()
         entropy_loss = -cfg.entropy_coef * entropies_t.mean()
 
-        # Critic loss (TD targets using learning rewards)
         td_targets = []
         for r, v_next, terminal in zip(rewards, next_values, dones):
             bootstrap = 0.0 if terminal else v_next.item()
@@ -560,7 +394,6 @@ def train_progressive(cfg: ProgressiveConfig) -> tuple[list[float], int, float, 
         avg100 = float(np.mean(episode_returns[-100:])) if len(episode_returns) >= 100 else float("nan")
         avg100_returns.append(avg100)
 
-        # Greedy evaluation on TRUE env return
         if (ep + 1) % cfg.eval_every == 0:
             last_greedy = evaluate_policy_greedy(cfg, actor, scaler, cfg.eval_episodes)
             eval_returns.append(last_greedy)
@@ -584,18 +417,11 @@ def train_progressive(cfg: ProgressiveConfig) -> tuple[list[float], int, float, 
     env.close()
     elapsed_time = time.time() - start_time
 
-    # Restore best actor
     if best_actor_state is not None:
         actor.load_state_dict(best_actor_state)
 
-    final_eval = evaluate_policy_greedy(cfg, actor, scaler, cfg.eval_episodes)
-    print(f"Final greedy eval ({cfg.eval_episodes} eps): {final_eval:.1f}")
-    print(f"\n--- Training Statistics ---")
-    print(f"Total episodes: {ep + 1}")
-    print(f"Total training iterations: {total_iterations}")
-    print(f"Elapsed time: {elapsed_time:.2f} seconds")
-    print(f"Solved at episode: {solved_ep if solved_ep != -1 else 'Not solved'}")
-    print(f"Best greedy return: {best_greedy:.2f}")
+    evaluate_policy_greedy(cfg, actor, scaler, cfg.eval_episodes)
+
 
     plot_learning_curves(
         train_returns=episode_returns,
@@ -624,37 +450,31 @@ def train_progressive(cfg: ProgressiveConfig) -> tuple[list[float], int, float, 
         used_reward_shaping=cfg.use_reward_shaping,
     )
 
-    # Save trained model
     models_dir = Path("models")
     models_dir.mkdir(parents=True, exist_ok=True)
     torch.save(actor.state_dict(), models_dir / "progressive_to_mountaincar_actor.pt")
-    print(f"Saved model to {models_dir}/progressive_to_mountaincar_actor.pt")
 
     return episode_returns, solved_ep, best_greedy, elapsed_time, total_iterations
 
 
 def main():
     cfg = ProgressiveConfig(
-        # Source networks
         source1_name="CartPole",
         source2_name="Acrobot",
         source1_path="models/cartpole_actor.pt",
         source2_path="models/acrobot_actor.pt",
         
-        # Target
         target_env="MountainCarContinuous-v0",
         
-        # Architecture
         fixed_obs_dim=6,
         fixed_act_dim=3,
         hidden=256,
         
-        # Training
         gamma=0.985,
-        lr_actor=1e-5,      # Further reduced for ~100 episode convergence
-        lr_critic=5e-4,     # Further reduced for ~100 episode convergence
-        lr_step_size=60,    # Decay every 60 episodes
-        lr_gamma=0.7,       # Multiply by 0.7 each time
+        lr_actor=1e-5,
+        lr_critic=5e-4,
+        lr_step_size=60,
+        lr_gamma=0.7,
         min_lr=1e-6,
         
         entropy_coef=0.01,
@@ -674,23 +494,9 @@ def main():
         use_I_weight=True,
         use_reward_shaping=True,
     )
+
     
-    print("\n=== Hyperparameters ===")
-    print(f"gamma: {cfg.gamma}")
-    print(f"lr_actor: {cfg.lr_actor}")
-    print(f"lr_critic: {cfg.lr_critic}")
-    print(f"entropy_coef: {cfg.entropy_coef}")
-    print(f"value_loss_coef: {cfg.value_loss_coef}")
-    print(f"max_grad_norm: {cfg.max_grad_norm}")
-    print(f"max_episodes: {cfg.max_episodes}")
-    print(f"solve_score: {cfg.solve_score}")
-    print("=======================\n")
-    
-    returns, solved_ep, best_greedy, elapsed_time, total_iterations = train_progressive(cfg)
-    
-    if returns:
-        print(f"\nDone. episodes={len(returns)}, solved_ep={solved_ep}, best_greedy={best_greedy:.1f}")
-        print(f"Elapsed time: {elapsed_time:.2f}s, Total iterations: {total_iterations}")
+    train_progressive(cfg)
 
 
 if __name__ == "__main__":
