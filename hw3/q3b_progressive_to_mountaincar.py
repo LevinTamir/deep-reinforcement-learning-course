@@ -1,5 +1,5 @@
 # ============================================
-# Section 3 – Progressive Transfer {CartPole, Acrobot} → MountainCarContinuous
+# Section 3 – Progressive Transfer {CartPole-v1, Acrobot-v1} → MountainCarContinuous-v0
 # Mark Feldman (320827637) & Tamir Levin (315765347)
 # ============================================
 
@@ -105,8 +105,9 @@ class SourceActor(nn.Module):
 
 
 class ProgressiveActor(nn.Module):
-    #progressive Networks Actor with lateral connections from frozen source networks
+    """Progressive Networks Actor with lateral connections from frozen source networks.
     For continuous actions (MountainCarContinuous).
+    """
     def __init__(self, cfg: ProgressiveConfig):
         super().__init__()
         

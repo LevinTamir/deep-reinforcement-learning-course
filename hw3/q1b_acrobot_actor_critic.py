@@ -1,5 +1,5 @@
 # ============================================
-# Section 1 – Actor-Critic (Acrobot-v1)
+# HW3 Section 1 – Actor-Critic (Acrobot-v1)
 # Mark Feldman (320827637) & Tamir Levin (315765347)
 # ============================================
 from dataclasses import dataclass

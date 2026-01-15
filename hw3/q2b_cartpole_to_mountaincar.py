@@ -1,3 +1,7 @@
+# ============================================
+# HW3 Section 2 – Transfer Learning (CartPole-v1 → MountainCarContinuous-v0)
+# Mark Feldman (320827637) & Tamir Levin (315765347)
+# ============================================
 
 from dataclasses import dataclass
 from copy import deepcopy

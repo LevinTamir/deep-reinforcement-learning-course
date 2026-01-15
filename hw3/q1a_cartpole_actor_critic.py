@@ -1,5 +1,5 @@
 # ============================================
-# Section 1 – Actor-Critic (CartPole-v1)
+# HW3 Section 1 – Actor-Critic (CartPole-v1)
 # Mark Feldman (320827637) & Tamir Levin (315765347)
 # ============================================
 

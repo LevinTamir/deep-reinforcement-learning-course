@@ -1,3 +1,9 @@
+# ============================================
+# HW3 Plotting Utils
+# Mark Feldman (320827637) & Tamir Levin (315765347)
+# ============================================
+
+
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path

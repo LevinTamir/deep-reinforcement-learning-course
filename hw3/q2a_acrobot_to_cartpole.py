@@ -1,5 +1,5 @@
 # ============================================
-# Section 2 – Transfer Learning (Acrobot-v1 -> CartPole-v1)
+# HW3 Section 2 – Transfer Learning (Acrobot-v1 → CartPole-v1)
 # Mark Feldman (320827637) & Tamir Levin (315765347)
 # ============================================
 

@@ -1,7 +1,8 @@
 # ============================================
-# Section 3 – Progressive Transfer {Acrobot, MountainCar}
+# Section 3 – Progressive Transfer {Acrobot-v1, MountainCarContinuous-v0} → CartPole-v1
 # Mark Feldman (320827637) & Tamir Levin (315765347)
 # ============================================
+
 from dataclasses import dataclass
 from copy import deepcopy
 import time
@@ -495,10 +496,7 @@ def main():
         solve_score=475.0,
     )
 
-    
     train_progressive(cfg)
-
-
 
 if __name__ == "__main__":
     main()
