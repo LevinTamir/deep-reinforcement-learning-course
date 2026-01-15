@@ -1,4 +1,7 @@
-
+# ============================================
+# Section 1 – Actor-Critic (Acrobot-v1)
+# Mark Feldman (320827637) & Tamir Levin (315765347)
+# ============================================
 from dataclasses import dataclass
 from copy import deepcopy
 import time
@@ -66,14 +69,6 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 
-def moving_average(x: list[float], window: int) -> np.ndarray:
-    x = np.asarray(x, dtype=np.float32)
-    if window <= 1 or len(x) < window:
-        return x
-    kernel = np.ones(window, dtype=np.float32) / window
-    return np.convolve(x, kernel, mode="valid")
-
-
 class Actor(nn.Module):
 
     def __init__(self, obs_dim: int, out_dim: int, hidden: int):
@@ -82,9 +77,10 @@ class Actor(nn.Module):
         self.fc2 = layer_init(nn.Linear(hidden, hidden))
         self.fc3 = layer_init(nn.Linear(hidden, out_dim), std=0.01)
 
+        # mild bias to avoid "do nothing" optimum
         with torch.no_grad():
-            self.fc3.bias[0].fill_(0.2)
-            self.fc3.bias[1].fill_(-0.5)
+            self.fc3.bias[0].fill_(0.2) #mu bias (small push)
+            self.fc3.bias[1].fill_(-0.5) #log_std bias (small push)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = torch.relu(self.fc1(x))
@@ -107,6 +103,13 @@ class Critic(nn.Module):
 
 def sample_action_and_logprob(cfg: A2CConfig, actor_out: torch.Tensor):
 
+    """
+    stochastic policy for training
+      sample a ~ Normal(mu, std)
+      use tanh(a) to bound into [-1, 1]
+      use log_prob with tanh correction for consistency
+    """
+
     mu = actor_out[0]
     log_std = actor_out[1].clamp(cfg.log_std_min, cfg.log_std_max)
     std = torch.exp(log_std)
@@ -115,6 +118,7 @@ def sample_action_and_logprob(cfg: A2CConfig, actor_out: torch.Tensor):
     pre_tanh = dist.rsample()
     action = torch.tanh(pre_tanh)
 
+    #log pi(a) with tanh correction: log p(u) - log(1 - tanh(u)^2)
     log_prob_u = dist.log_prob(pre_tanh)
     correction = torch.log(1.0 - action.pow(2) + 1e-6)
     log_prob = (log_prob_u - correction).squeeze()
@@ -166,6 +170,8 @@ def compute_td_advantages(
     dones: list[bool],
     gamma: float,
 ) -> torch.Tensor:
+
+    #compute TD(0) advantages: δ_t = r_t + γ * V(s_{t+1}) * (1 - done) - V(s_t)
 
     advantages = []
     for r, v, v_next, done in zip(rewards, values, next_values, dones):

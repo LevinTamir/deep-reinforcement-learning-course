@@ -1,3 +1,8 @@
+# ============================================
+# Section 3 – Progressive Transfer {CartPole, Acrobot} → MountainCarContinuous
+# Mark Feldman (320827637) & Tamir Levin (315765347)
+# ============================================
+
 
 from dataclasses import dataclass
 from copy import deepcopy
@@ -72,7 +77,7 @@ def step_env(env, action: np.ndarray):
     return obs2, float(reward), bool(terminated), bool(truncated), info
 
 class SourceActor(nn.Module):
-
+    #frozen source actor network
     def __init__(self, obs_dim: int = 6, act_dim: int = 3, hidden: int = 256):
         super().__init__()
         self.obs_dim = obs_dim
@@ -100,7 +105,8 @@ class SourceActor(nn.Module):
 
 
 class ProgressiveActor(nn.Module):
-
+    #progressive Networks Actor with lateral connections from frozen source networks
+    For continuous actions (MountainCarContinuous).
     def __init__(self, cfg: ProgressiveConfig):
         super().__init__()
         
@@ -137,6 +143,7 @@ class ProgressiveActor(nn.Module):
 
 
 class Critic(nn.Module):
+    #value function V(s; w)
     def __init__(self, obs_dim: int, hidden: int):
         super().__init__()
         self.fc1 = layer_init(nn.Linear(obs_dim, hidden))
@@ -150,7 +157,11 @@ class Critic(nn.Module):
 
 
 def sample_action_and_logprob(cfg: ProgressiveConfig, actor_out: torch.Tensor):
-
+    """
+    stochastic policy for continuous actions:
+      sample a ~ Normal(mu, std)
+      use tanh(a) to bound into [-1, 1]
+    """
     mu = actor_out[0]
     log_std = actor_out[1].clamp(cfg.log_std_min, cfg.log_std_max)
     std = torch.exp(log_std)
@@ -159,6 +170,7 @@ def sample_action_and_logprob(cfg: ProgressiveConfig, actor_out: torch.Tensor):
     pre_tanh = dist.rsample()
     action = torch.tanh(pre_tanh)
 
+    #log pi(a) with tanh correction
     log_prob_u = dist.log_prob(pre_tanh)
     correction = torch.log(1.0 - action.pow(2) + 1e-6)
     log_prob = (log_prob_u - correction).squeeze()

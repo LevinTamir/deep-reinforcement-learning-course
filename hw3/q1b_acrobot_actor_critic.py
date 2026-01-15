@@ -1,3 +1,7 @@
+# ============================================
+# Section 1 – Actor-Critic (Acrobot-v1)
+# Mark Feldman (320827637) & Tamir Levin (315765347)
+# ============================================
 from dataclasses import dataclass
 from copy import deepcopy
 import time
@@ -45,6 +49,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 def pad_observation(obs: np.ndarray, target_size: int = 6) -> np.ndarray:
+    """pad observation to target size for meta learning"""
     obs = np.asarray(obs, dtype=np.float32)
     if len(obs) < target_size:
         obs = np.pad(obs, (0, target_size - len(obs)), mode='constant', constant_values=0.0)
@@ -99,7 +104,7 @@ def compute_td_advantages(
     dones: list[bool],
     gamma: float
 ) -> torch.Tensor:
-
+    #compute TD(0) advantages: δ_t = r_t + γ * V(s_{t+1}) * (1 - done) - V(s_t)
     advantages = []
     for r, v, v_next, done in zip(rewards, values, next_values, dones):
         bootstrap = 0.0 if done else v_next.item()
@@ -111,6 +116,7 @@ def compute_td_advantages(
 
 @torch.no_grad()
 def evaluate_policy(cfg: A2CConfig, actor: Actor, episodes: int = 10) -> float:
+    #evaluate policy using argmax action selection
     was_training = actor.training
     actor.eval()
     env = gym.make(cfg.env_name)
@@ -135,7 +141,7 @@ def evaluate_policy(cfg: A2CConfig, actor: Actor, episodes: int = 10) -> float:
     return float(np.mean(returns))
 
 def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
-
+    #train A2C agent
     start_time = time.time()
 
     random.seed(cfg.seed)

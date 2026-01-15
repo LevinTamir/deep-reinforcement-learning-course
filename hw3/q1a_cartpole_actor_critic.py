@@ -1,3 +1,8 @@
+# ============================================
+# Section 1 – Actor-Critic (CartPole-v1)
+# Mark Feldman (320827637) & Tamir Levin (315765347)
+# ============================================
+
 from dataclasses import dataclass
 from copy import deepcopy
 import time
@@ -45,6 +50,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 def pad_observation(obs: np.ndarray, target_size: int = 6) -> np.ndarray:
+    """pad observation to target size with zeros for meta learning"""
     obs = np.asarray(obs, dtype=np.float32)
     if len(obs) < target_size:
         obs = np.pad(obs, (0, target_size - len(obs)), mode='constant', constant_values=0.0)
@@ -92,8 +98,11 @@ def compute_td_advantages(
     gamma: float
 ) -> torch.Tensor:
 
+    """compute TD(0) advantages: δ_t = r_t + γ * V(s_{t+1}) * (1 - done) - V(s_t)"""
+
     advantages = []
     for r, v, v_next, done in zip(rewards, values, next_values, dones):
+        # td-error: δ = r + γV(s') - V(s)
         bootstrap = 0.0 if done else v_next.item()
         td_target = r + gamma * bootstrap
         td_error = td_target - v.item()
@@ -103,6 +112,9 @@ def compute_td_advantages(
 
 @torch.no_grad()
 def evaluate_policy(cfg: A2CConfig, actor: Actor, episodes: int = 10) -> float:
+    
+    """evaluate policy using argmax action selection"""
+
     was_training = actor.training
     actor.eval()
     env = gym.make(cfg.env_name)
@@ -127,6 +139,8 @@ def evaluate_policy(cfg: A2CConfig, actor: Actor, episodes: int = 10) -> float:
     return float(np.mean(returns))
 
 def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
+    """train A2C agent"""
+
     start_time = time.time()
 
     random.seed(cfg.seed)
@@ -176,6 +190,7 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
 
         while not done:
             obs_t = torch.as_tensor(pad_observation(obs), dtype=torch.float32)
+            #actor sample action
             logits = actor(obs_t)
             dist = torch.distributions.Categorical(logits=logits)
             action_t = dist.sample()
@@ -183,6 +198,7 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
             log_prob = dist.log_prob(action_t)
             entropy = dist.entropy()
             
+            #critic estimate value
             value = critic(obs_t)
             
             obs2, reward, terminated, truncated, _ = step_env(env, api, action)
@@ -192,6 +208,7 @@ def train_a2c(cfg: A2CConfig) -> tuple[list[float], int, float, float, int]:
                 obs2_t = torch.as_tensor(pad_observation(obs2), dtype=torch.float32)
                 next_value = critic(obs2_t)
             
+            #store transition
             states.append(obs_t)
             actions.append(action_t)
             log_probs.append(log_prob)

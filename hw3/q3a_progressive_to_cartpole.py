@@ -1,3 +1,7 @@
+# ============================================
+# Section 3 – Progressive Transfer {Acrobot, MountainCar}
+# Mark Feldman (320827637) & Tamir Levin (315765347)
+# ============================================
 from dataclasses import dataclass
 from copy import deepcopy
 import time
@@ -65,7 +69,10 @@ def pad_observation(obs: np.ndarray, target_size: int = 6) -> np.ndarray:
 
 
 class SourceActor(nn.Module):
-
+    """
+    frozen source actor network 
+    loads pretrained weights and exposes ALL hidden layer features for lateral connections
+    """
     def __init__(self, obs_dim: int = 6, act_dim: int = 3, hidden: int = 256):
         super().__init__()
         self.obs_dim = obs_dim
@@ -81,11 +88,13 @@ class SourceActor(nn.Module):
         return self.fc3(x)
     
     def get_all_hidden_features(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        #extract features from both hidden layers for lateral connections
         h1 = torch.relu(self.fc1(x))
         h2 = torch.nn.functional.elu(self.fc2(h1))
         return h1, h2
     
     def get_hidden_features(self, x: torch.Tensor) -> torch.Tensor:
+        #extract features from the top hidden layer (fc2 output)
         x = torch.relu(self.fc1(x))
         x = torch.nn.functional.elu(self.fc2(x))
         return x
@@ -100,6 +109,15 @@ class SourceActor(nn.Module):
 
 class ProgressiveActor(nn.Module):
 
+    """
+    progressive networks actor with gated lateral connections.
+    
+    architecture:
+    two frozen source networks (Acrobot, MountainCar)
+    one trainable target network
+    learnable gates that control how much source knowledge flows in
+    gates initialized near zero to allow target to learn first, then gradually use sources
+    """
     def __init__(self, cfg: ProgressiveConfig):
         super().__init__()
         
@@ -156,6 +174,7 @@ class ProgressiveActor(nn.Module):
 
 
 class Critic(nn.Module):
+    #value function V(s; w) - standard architecture
     def __init__(self, obs_dim: int = 6, hidden: int = 256):
         super().__init__()
         self.obs_dim = obs_dim
@@ -199,6 +218,12 @@ def compute_gae_advantages(
     gae_lambda: float
 ) -> torch.Tensor:
 
+    """
+    compute GAE advantages
+    A_t^GAE = Σ_{l=0}^{∞} (γλ)^l * δ_{t+l}
+    where δ_t = r_t + γ * V(s_{t+1}) - V(s_t)
+    """
+    
     advantages = []
     gae = 0.0
     

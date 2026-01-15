@@ -1,3 +1,7 @@
+# ============================================
+# Section 2 – Transfer Learning (Acrobot-v1 -> CartPole-v1)
+# Mark Feldman (320827637) & Tamir Levin (315765347)
+# ============================================
 
 from dataclasses import dataclass
 from copy import deepcopy
@@ -63,6 +67,7 @@ def pad_observation(obs: np.ndarray, target_size: int = 6) -> np.ndarray:
 
 
 class Actor(nn.Module):
+    #policy network π(a|s; θ) - 6 input, 3 output for unified architecture
     def __init__(self, obs_dim: int = 6, act_dim: int = 3, hidden: int = 256):
         super().__init__()
         self.obs_dim = 6
@@ -78,6 +83,7 @@ class Actor(nn.Module):
 
 
 class Critic(nn.Module):
+    #value function V(s; w) - 6 input for unified architectu
     def __init__(self, obs_dim: int = 6, hidden: int = 256):
         super().__init__()
         self.obs_dim = 6
@@ -110,7 +116,7 @@ def compute_td_advantages(
     dones: list[bool],
     gamma: float
 ) -> torch.Tensor:
-
+    #compute TD(0) advantages: δ_t = r_t + γ * V(s_{t+1}) * (1 - done) - V(s_t)
     advantages = []
     for r, v, v_next, done in zip(rewards, values, next_values, dones):
         bootstrap = 0.0 if done else v_next.item()
@@ -141,7 +147,7 @@ def compute_gae_advantages(
 
 
 def shaped_reward_cartpole(obs: np.ndarray, obs2: np.ndarray, r_env: float, done: bool) -> float:
-
+    #reward shaping for CartPole: bonus for upright pole, penalty for terminationReward shaping for CartPole: bonus for upright pole, penalty for termination
     pole_angle = obs2[2]
     
     angle_bonus = 0.1 * (1.0 - abs(pole_angle) / 0.2095)
