@@ -3,6 +3,7 @@ figs_q1/
 figs_q2/
 figs*/
 *.png
+*.pdf
 
 # TensorBoard logs
 runs/
